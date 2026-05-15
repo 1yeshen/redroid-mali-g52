@@ -1,56 +1,60 @@
 # ============================================================
 # Dockerfile: Mali-G52 GPU overlay for redroid on RK3568
 # ============================================================
+# Multi-stage build strategy:
+#   Stage 1 (mali-preparer): Use Alpine Linux to arrange Mali
+#     binary files into /vendor/ directory structure.
+#   Stage 2 (final): Copy /vendor/ from Stage 1 into the
+#     redroid base image using COPY --from (no shell needed).
+#
+# This avoids running any commands inside the redroid image,
+# which may not have a working /bin/sh (Android minimal base).
+#
 # Usage:
-#   docker build -t redroid-mali-g52 \
-#     --build-arg REDROID_BASE=redroid/redroid:14.0.0_64only-latest \
-#     -f docker/Dockerfile .
+#   docker buildx build --platform linux/arm64 \
+#     --build-arg REDROID_BASE=redroid/redroid:14.0.0-latest \
+#     -t redroid-mali-g52 -f docker/Dockerfile .
 #
 # The mali-binaries/ directory must exist in the build context
 # (containing vendor/lib64/egl/libGLES_mali.so etc.)
 # ============================================================
 
-ARG REDROID_BASE=redroid/redroid:14.0.0_64only-latest
+# -----------------------------------------------------------
+# Stage 1: Arrange Mali files using a standard Linux image
+# -----------------------------------------------------------
+FROM alpine:latest AS mali-preparer
+
+# Copy Mali source binaries and config files
+COPY mali-binaries/ /mali-src/
+COPY docker/mali-config/ /mali-config/
+
+# Create the /vendor directory structure with all Mali files
+RUN set -e; \
+    echo "[*] Preparing Mali GPU driver files..."; \
+    \
+    # Copy vendor files preserving directory structure \
+    if [ -d /mali-src/vendor ]; then \
+        cp -rv /mali-src/vendor/* /vendor/ 2>/dev/null || true; \
+    fi; \
+    \
+    # Copy config overlay files \
+    if [ -d /mali-config ]; then \
+        cp -rv /mali-config/* /vendor/ 2>/dev/null || true; \
+    fi; \
+    \
+    # Show what was prepared \
+    echo "[*] Files in /vendor/:"; \
+    find /vendor -type f -exec ls -lh {} \; 2>/dev/null | head -20; \
+    echo "[✓] Mali files prepared successfully"
+
+# -----------------------------------------------------------
+# Stage 2: Final redroid image with Mali drivers
+# -----------------------------------------------------------
+ARG REDROID_BASE=redroid/redroid:14.0.0-latest
 FROM $REDROID_BASE
 
-# Copy the entire mali-binaries directory into temp location
-COPY mali-binaries/ /tmp/mali-binaries/
-
-# Install Mali GPU drivers - only copy files that exist
-RUN set -e; \
-    if [ -f /tmp/mali-binaries/vendor/lib64/egl/libGLES_mali.so ]; then \
-        echo "[*] Installing Mali GPU userspace driver (64-bit)"; \
-        install -D -m 644 /tmp/mali-binaries/vendor/lib64/egl/libGLES_mali.so \
-            /vendor/lib64/egl/libGLES_mali.so; \
-    fi; \
-    if [ -f /tmp/mali-binaries/vendor/lib/egl/libGLES_mali.so ]; then \
-        echo "[*] Installing Mali GPU userspace driver (32-bit)"; \
-        install -D -m 644 /tmp/mali-binaries/vendor/lib/egl/libGLES_mali.so \
-            /vendor/lib/egl/libGLES_mali.so; \
-    fi; \
-    for f in /tmp/mali-binaries/vendor/lib64/hw/*.so; do \
-        if [ -f "$f" ]; then \
-            echo "[*] Installing $(basename $f)"; \
-            install -D -m 644 "$f" "/vendor/lib64/hw/$(basename $f)"; \
-        fi; \
-    done; \
-    for f in /tmp/mali-binaries/vendor/lib/hw/*.so; do \
-        if [ -f "$f" ]; then \
-            echo "[*] Installing $(basename $f) (32-bit)"; \
-            install -D -m 644 "$f" "/vendor/lib/hw/$(basename $f)"; \
-        fi; \
-    done; \
-    if [ -d /tmp/mali-binaries/vendor/etc ]; then \
-        cp -rv /tmp/mali-binaries/vendor/etc/* /vendor/etc/ 2>/dev/null || true; \
-    fi; \
-    rm -rf /tmp/mali-binaries
-
-# Copy Mali init config files
-COPY docker/mali-config/ /tmp/mali-config/
-RUN if [ -d /tmp/mali-config ]; then \
-        cp -rv /tmp/mali-config/* /vendor/ 2>/dev/null || true; \
-        rm -rf /tmp/mali-config; \
-    fi
+# Copy pre-arranged Mali files from Stage 1 (no shell needed in this image)
+COPY --from=mali-preparer /vendor/ /vendor/
 
 # Set Mali GPU mode
 ENV TARGET_BOARD_PLATFORM_GPU=mali-G52

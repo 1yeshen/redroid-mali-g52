@@ -25,9 +25,9 @@ on:
         default: ''
         type: string
       redroid_version:
-        description: 'Base redroid image tag'
+        description: 'Base redroid image tag (use -latest for multi-arch, -arm64 for ARM64 only)'
         required: false
-        default: '14.0.0_64only-latest'
+        default: '14.0.0-latest'
         type: string
       push_to_ghcr:
         description: 'Push image to GitHub Container Registry'
@@ -181,7 +181,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=,format=short
-            type=raw,value=${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
+            type=raw,value=${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -189,8 +189,9 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          platforms: linux/arm64
           build-args: |
-            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
+            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event.inputs.push_to_ghcr != 'false' }}
@@ -203,7 +204,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Mali driver | ${{ needs.extract-mali.outputs.mali_found == 'true' && '✅ Found' || '❌ Not found' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Output image | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |" >> $GITHUB_STEP_SUMMARY
@@ -267,7 +268,8 @@ jobs:
           context: .
           file: docker/Dockerfile
           build-args: |
-            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
+            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
             BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-${{ github.sha }}
+          platforms: linux/arm64
           push: false
