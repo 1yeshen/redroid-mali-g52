@@ -63,7 +63,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             wget unzip android-sdk-libsparse-utils e2tools file xz-utils \
-            lz4
+            lz4 fdisk
+          # Download lpunpack.py for extracting super partition logical volumes
+          wget -q -O /usr/local/bin/lpunpack.py \
+            https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
+          chmod +x /usr/local/bin/lpunpack.py
 
       - name: Download firmware (if URL provided)
         if: ${{ github.event.inputs.firmware_url != '' }}

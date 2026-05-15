@@ -310,19 +310,22 @@ for i, p in enumerate(parts):
     
     # Check if super.img was extracted and needs lpunpack
     if [ -f "$WORKDIR/super.img" ]; then
-        echo "[*] Attempting to process super partition with lpunpack..."
-        command -v lpunpack &>/dev/null || {
-            echo "[!] lpunpack not available, installing..."
-            apt-get install -y android-tools-fsutils 2>/dev/null || true
-        }
-        if command -v lpunpack &>/dev/null; then
+        echo "[*] Attempting to process super partition with lpunpack (Python)..."
+        LPUNPACK="/usr/local/bin/lpunpack.py"
+        if [ -f "$LPUNPACK" ]; then
             mkdir -p "$WORKDIR/super_extracted"
-            lpunpack "$WORKDIR/super.img" "$WORKDIR/super_extracted/" 2>/dev/null || true
+            echo "[*] Running: python3 $LPUNPACK $WORKDIR/super.img $WORKDIR/super_extracted/"
+            python3 "$LPUNPACK" "$WORKDIR/super.img" "$WORKDIR/super_extracted/" 2>&1 || true
+            echo "[*] lpunpack.py result:"
+            ls -la "$WORKDIR/super_extracted/" 2>/dev/null || echo "(empty)"
+            
             for slot_img in "$WORKDIR/super_extracted"/*.img; do
                 [ -f "$slot_img" ] || continue
                 echo "[*] Processing $slot_img..."
                 extract_from_image "$slot_img"
             done
+        else
+            echo "[!] lpunpack.py not found, cannot unpack super partition"
         fi
     fi
 }
