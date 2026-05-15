@@ -1,0 +1,40 @@
+redroid-mali-g52 — NOTICE
+==========================
+Copyright (C) 2026  1yeshen
+
+This software is distributed under the GNU General Public License v3.0
+(GPL-3.0).  For the full license text, see the LICENSE file
+accompanying this distribution.
+
+---
+
+This product includes software components from the following projects:
+
+1. redroid (Android in Docker)
+   - Source: https://github.com/remote-android/redroid-doc
+   - License: Apache-2.0 / Redroid Project License
+
+2. redroid-rockchip (RK3588 redroid port)
+   - Source: https://github.com/CNflysky/redroid-rk3588
+   - License: Apache-2.0
+
+3. Mali GPU Userspace Drivers (from Rockchip BSP / RK3568 firmware)
+   - These are binary blobs extracted from Rockchip Android firmware
+   - Licensed under ARM's proprietary Mali EULA
+   - These binaries are NOT covered by the GPL-3.0 license above
+
+4. Rockchip BSP Kernel Mali Driver (bifrost_kbase.ko)
+   - Source: https://github.com/rockchip-linux/kernel (develop-6.6 branch)
+   - Licensed under GPL-2.0 (kernel-space driver)
+
+5. libmali-rockchip (reference / research)
+   - Source: https://github.com/tsukumijima/libmali-rockchip
+   - License: Apache-2.0
+
+---
+
+This product includes binary code from Rockchip Electronics Co., Ltd.
+and ARM Ltd. (Mali GPU driver).  These components are used under the
+terms of their respective licenses.  If you are the copyright holder
+of any component and believe your rights are not properly attributed,
+please contact the project maintainer.
