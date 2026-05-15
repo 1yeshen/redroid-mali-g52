@@ -64,7 +64,67 @@ echo "[*] Firmware size: $(ls -lh "$FIRMWARE_PATH" | awk '{print $5}')"
 file "$FIRMWARE_PATH"
 
 # -----------------------------------------------------------
-# Step 1.5: Handle Rockchip RKFW/RKAF unified firmware format
+# Step 1.5: Extract from archive (7z/zip) if needed
+# -----------------------------------------------------------
+# The firmware URL may return a compressed archive (.7z, .zip)
+# containing the actual update.img inside. Detect and extract.
+extract_from_archive() {
+    local fw_path="$1"
+    local fw_type
+    fw_type=$(file "$fw_path")
+
+    # Check for 7-zip archive
+    if echo "$fw_type" | grep -qi "7-zip\|7z"; then
+        echo "[*] Detected 7-zip archive, extracting..."
+        mkdir -p "$WORKDIR/archive_out"
+        7z x "$fw_path" -o"$WORKDIR/archive_out/" -y 2>/dev/null || {
+            echo "[!] 7z extraction failed, trying bsdtar..."
+            bsdtar xf "$fw_path" -C "$WORKDIR/archive_out/" 2>/dev/null || return 1
+        }
+        
+        # Find the largest .img file recursively
+        local img_file
+        img_file=$(find "$WORKDIR/archive_out" -name "*.img" -type f -printf "%s\t%p\n" 2>/dev/null | sort -n | tail -1 | cut -f2)
+        if [ -n "$img_file" ]; then
+            echo "[*] Extracted image: $img_file ($(ls -lh "$img_file" | awk '{print $5}'))"
+            cp "$img_file" "$WORKDIR/firmware_extracted.img"
+            FIRMWARE_PATH="$WORKDIR/firmware_extracted.img"
+            echo "[*] Updated FIRMWARE_PATH to extracted image"
+            file "$FIRMWARE_PATH"
+            return 0
+        else
+            echo "[!] No .img file found in 7z archive"
+            ls -la "$WORKDIR/archive_out/"
+            return 1
+        fi
+    fi
+
+    # Check for zip archive
+    if unzip -l "$fw_path" &>/dev/null; then
+        echo "[*] Detected zip archive, extracting..."
+        mkdir -p "$WORKDIR/archive_out"
+        unzip -o "$fw_path" -d "$WORKDIR/archive_out/" 2>/dev/null || true
+        
+        local img_file
+        img_file=$(find "$WORKDIR/archive_out" -name "*.img" -type f -printf "%s\t%p\n" 2>/dev/null | sort -n | tail -1 | cut -f2)
+        if [ -n "$img_file" ]; then
+            echo "[*] Extracted image: $img_file ($(ls -lh "$img_file" | awk '{print $5}'))"
+            cp "$img_file" "$WORKDIR/firmware_extracted.img"
+            FIRMWARE_PATH="$WORKDIR/firmware_extracted.img"
+            echo "[*] Updated FIRMWARE_PATH to extracted image"
+            file "$FIRMWARE_PATH"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Try to extract from archive. If successful, FIRMWARE_PATH is updated.
+extract_from_archive "$FIRMWARE_PATH"
+
+# -----------------------------------------------------------
+# Step 1.6: Handle Rockchip RKFW/RKAF unified firmware format
 # -----------------------------------------------------------
 # RKFW format: starts with "RKFW" magic, contains a boot loader
 # and an embedded RKAF (Rockchip Android Firmware) image.
