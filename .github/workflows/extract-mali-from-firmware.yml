@@ -170,7 +170,7 @@ jobs:
               ls -la "$PART_DIR/dynamic/"
               # Symlink dynamic partitions into PART_DIR for unified processing
               for f in "$PART_DIR/dynamic"/*.img; do
-                [ -f "$f" ] && ln -sf "$f" "$PART_DIR/$(basename "$f")" 2>/dev/null || true
+                [ -f "$f" ] && ln -sf "$(realpath "$f")" "$PART_DIR/$(basename "$f")" 2>/dev/null || true
               done
             else
               echo "  -> lpunpack failed (may not be super.img format)"
@@ -196,22 +196,21 @@ jobs:
           # Step 3: Extract Mali files from each partition
           # --------------------------------------------------
           for img in "$PART_DIR"/*.img "$PART_DIR"/*.bin; do
-            [ -f "$img" ] || continue
+            # Resolve symlinks (e.g. vendor.img -> dynamic/vendor.img)
+            REAL_IMG=$(readlink -f "$img" 2>/dev/null || echo "$img")
+            [ -f "$REAL_IMG" ] || continue
             base=$(basename "$img")
             echo ""
-            echo "[*] Processing: $base ($(ls -lh "$img" | awk '{print $5}'))"
-            file "$img"
+            echo "[*] Processing: $base ($(ls -lh "$REAL_IMG" | awk '{print $5}'))"
+            file "$REAL_IMG"
             
-            # Skip if it's a symlink (already handled)
-            [ -L "$img" ] && { echo "  -> Skipping symlink"; continue; }
-            
-            # Convert sparse to raw if needed
-            RAW_IMG="$img.raw"
-            if simg2img "$img" "$RAW_IMG" 2>/dev/null; then
+            # Convert sparse to raw if needed (use real path)
+            RAW_IMG="${REAL_IMG}.raw"
+            if simg2img "$REAL_IMG" "$RAW_IMG" 2>/dev/null; then
               echo "  -> Converted from sparse to raw"
               mount_candidate="$RAW_IMG"
             else
-              mount_candidate="$img"
+              mount_candidate="$REAL_IMG"
             fi
             
             # Try to mount and extract Mali files
