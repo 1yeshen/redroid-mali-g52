@@ -13,7 +13,7 @@
 #   - Raw ext4 images
 # ============================================================
 
-set -euo pipefail
+set -uo pipefail
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <firmware_url|firmware_path> <output_dir>"
@@ -23,7 +23,15 @@ fi
 SRC="$1"
 OUTDIR="$2"
 WORKDIR=$(mktemp -d)
-trap 'rm -rf "$WORKDIR"' EXIT
+# Cleanup function that handles read-only mounts gracefully
+cleanup() {
+    # Unmount any remaining mounts first
+    mountpoint -q "$WORKDIR/mnt" 2>/dev/null && sudo umount "$WORKDIR/mnt" 2>/dev/null || true
+    mountpoint -q "$WORKDIR/mnt2" 2>/dev/null && sudo umount "$WORKDIR/mnt2" 2>/dev/null || true
+    # Then remove workdir (ignore errors for read-only files)
+    rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 mkdir -p "$OUTDIR"
 echo "[*] Working directory: $WORKDIR"
