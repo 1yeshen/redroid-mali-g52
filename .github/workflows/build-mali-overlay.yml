@@ -159,6 +159,9 @@ jobs:
           echo "[*] libGLES_mali.so details:"
           file mali-binaries/vendor/lib64/egl/libGLES_mali.so 2>/dev/null || echo "Not found!"
 
+      - name: Set up QEMU (for aarch64 cross-architecture builds)
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -228,6 +231,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up QEMU (for aarch64 cross-architecture builds)
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
