@@ -13,27 +13,46 @@
 ARG REDROID_BASE=redroid/redroid:14.0.0_64only-latest
 FROM $REDROID_BASE
 
-# Copy Mali GPU userspace drivers from build context
-# These were pre-extracted from RK3568 Android firmware in CI
-COPY mali-binaries/vendor/lib64/egl/libGLES_mali.so \
-    /vendor/lib64/egl/libGLES_mali.so
-COPY mali-binaries/vendor/lib64/hw/android.hardware.graphics.allocator@4.0-impl-bifrost.so \
-    /vendor/lib64/hw/android.hardware.graphics.allocator@4.0-impl-bifrost.so
-COPY mali-binaries/vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so \
-    /vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so
-COPY mali-binaries/vendor/lib64/hw/hwcomposer.rockchip.so \
-    /vendor/lib64/hw/hwcomposer.rockchip.so
-COPY mali-binaries/vendor/etc/gralloc/capabilities.xml \
-    /vendor/etc/gralloc/capabilities.xml
+# Copy the entire mali-binaries directory into temp location
+COPY mali-binaries/ /tmp/mali-binaries/
 
-# Copy Mali HAL init config
-COPY docker/mali-config/ /vendor/
+# Install Mali GPU drivers - only copy files that exist
+RUN set -e; \
+    if [ -f /tmp/mali-binaries/vendor/lib64/egl/libGLES_mali.so ]; then \
+        echo "[*] Installing Mali GPU userspace driver (64-bit)"; \
+        install -D -m 644 /tmp/mali-binaries/vendor/lib64/egl/libGLES_mali.so \
+            /vendor/lib64/egl/libGLES_mali.so; \
+    fi; \
+    if [ -f /tmp/mali-binaries/vendor/lib/egl/libGLES_mali.so ]; then \
+        echo "[*] Installing Mali GPU userspace driver (32-bit)"; \
+        install -D -m 644 /tmp/mali-binaries/vendor/lib/egl/libGLES_mali.so \
+            /vendor/lib/egl/libGLES_mali.so; \
+    fi; \
+    for f in /tmp/mali-binaries/vendor/lib64/hw/*.so; do \
+        if [ -f "$f" ]; then \
+            echo "[*] Installing $(basename $f)"; \
+            install -D -m 644 "$f" "/vendor/lib64/hw/$(basename $f)"; \
+        fi; \
+    done; \
+    for f in /tmp/mali-binaries/vendor/lib/hw/*.so; do \
+        if [ -f "$f" ]; then \
+            echo "[*] Installing $(basename $f) (32-bit)"; \
+            install -D -m 644 "$f" "/vendor/lib/hw/$(basename $f)"; \
+        fi; \
+    done; \
+    if [ -d /tmp/mali-binaries/vendor/etc ]; then \
+        cp -rv /tmp/mali-binaries/vendor/etc/* /vendor/etc/ 2>/dev/null || true; \
+    fi; \
+    rm -rf /tmp/mali-binaries
 
-# Set proper permissions
-RUN chmod 644 /vendor/lib64/egl/libGLES_mali.so && \
-    chmod 644 /vendor/lib64/hw/*.so 2>/dev/null || true
+# Copy Mali init config files
+COPY docker/mali-config/ /tmp/mali-config/
+RUN if [ -d /tmp/mali-config ]; then \
+        cp -rv /tmp/mali-config/* /vendor/ 2>/dev/null || true; \
+        rm -rf /tmp/mali-config; \
+    fi
 
-# Set Mali GPU mode - redroid detects libGLES_mali.so at runtime
+# Set Mali GPU mode
 ENV TARGET_BOARD_PLATFORM_GPU=mali-G52
 ENV TARGET_RK_GRALLOC_VERSION=4
 
