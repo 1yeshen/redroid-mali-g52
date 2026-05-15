@@ -270,12 +270,18 @@ jobs:
             echo "=== Mali DDK version ==="
             strings "$MALI_SO" | grep -E "arm_release_ver|rk_so_ver|g[0-9]+p[0-9]" | head -5
             
-            # Normalize path to vendor/lib64/egl/ for commit step
-            mkdir -p mali_output/vendor/lib64/egl
-            if [ ! -f mali_output/vendor/lib64/egl/libGLES_mali.so ]; then
-              cp "$MALI_SO" mali_output/vendor/lib64/egl/libGLES_mali.so
-              echo "[✓] Copied to mali_output/vendor/lib64/egl/ for commit"
-            fi
+            # Normalize paths to vendor/ for commit step
+            # (vendor partition is mounted directly, so lib64/ -> vendor/lib64/)
+            echo ""
+            echo "=== Normalizing paths for commit ==="
+            for dir in lib lib64 system; do
+              if [ -d "mali_output/$dir" ]; then
+                mkdir -p "mali_output/vendor/$dir"
+                cp -rv "mali_output/$dir/"* "mali_output/vendor/$dir/" 2>/dev/null || true
+                echo "  -> Copied mali_output/$dir/ to mali_output/vendor/$dir/"
+              fi
+            done
+            echo "[✓] Paths normalized"
           else
             echo "[!] libGLES_mali.so NOT found!"
             find mali_output -name "*.so" | head -20
