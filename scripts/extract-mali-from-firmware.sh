@@ -610,6 +610,88 @@ for part in vendor system super product; do
     fi
 done
 
+# -----------------------------------------------------------
+# Step 4.5: Handle super partition (Android dynamic partitions)
+# super.img contains logical volumes: system, vendor, product, etc.
+# These need lpunpack to extract before they can be mounted.
+# -----------------------------------------------------------
+process_super_partition() {
+    local super_img="$1"
+    
+    if [ ! -f "$super_img" ]; then
+        return 1
+    fi
+    
+    echo "[*] Found super partition: $super_img ($(ls -lh "$super_img" | awk '{print $5}'))"
+    
+    # Convert sparse super.img to raw if needed
+    local raw_super="$WORKDIR/super_raw.img"
+    if file "$super_img" | grep -qi "sparse"; then
+        echo "[*] Converting sparse super image..."
+        simg2img "$super_img" "$raw_super" 2>/dev/null || {
+            echo "[!] simg2img conversion failed, using original"
+            cp "$super_img" "$raw_super"
+        }
+    else
+        cp "$super_img" "$raw_super"
+    fi
+    
+    # Run lpunpack to extract logical volumes
+    local LPUNPACK="/usr/local/bin/lpunpack.py"
+    local super_out="$WORKDIR/super_extracted"
+    
+    if [ -f "$LPUNPACK" ]; then
+        mkdir -p "$super_out"
+        echo "[*] Running lpunpack.py to extract logical volumes..."
+        python3 "$LPUNPACK" "$raw_super" "$super_out/" 2>&1 || {
+            echo "[!] lpunpack.py failed, checking output..."
+        }
+        
+        echo "[*] Logical volumes extracted:"
+        ls -lh "$super_out/" 2>/dev/null || echo "(empty)"
+        
+        # Process each extracted logical volume
+        local found_any=0
+        for slot_img in "$super_out"/*.img; do
+            [ -f "$slot_img" ] || continue
+            local vol_name=$(basename "$slot_img" .img)
+            echo ""
+            echo "[*] Processing logical volume: $vol_name"
+            extract_from_image "$slot_img"
+            local vol_rc=$?
+            if [ $vol_rc -gt 0 ]; then
+                found_any=$((found_any + vol_rc))
+            fi
+        done
+        
+        if [ $found_any -gt 0 ]; then
+            echo "[✓] Extracted Mali files from super logical volumes"
+            return 0
+        fi
+    else
+        echo "[!] lpunpack.py not found at $LPUNPACK"
+        echo "[!] Cannot unpack super partition without lpunpack"
+        
+        # Try lpunpack from PATH or pip
+        if command -v lpunpack &>/dev/null; then
+            echo "[*] Found 'lpunpack' in PATH, trying..."
+            mkdir -p "$super_out"
+            lpunpack "$raw_super" "$super_out/" 2>&1 || true
+            for slot_img in "$super_out"/*.img; do
+                [ -f "$slot_img" ] || continue
+                extract_from_image "$slot_img"
+            done
+        fi
+    fi
+    
+    return 1
+}
+
+# Process super.img if it exists (from RKAF unpack or other sources)
+if [ -f "$WORKDIR/super.img" ]; then
+    process_super_partition "$WORKDIR/super.img"
+fi
+
 # Try to find images using unzip (some firmware is zip-archived)
 if unzip -l "$FIRMWARE_PATH" &>/dev/null; then
     echo "[*] Firmware is a zip archive, extracting..."
