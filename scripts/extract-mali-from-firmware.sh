@@ -159,7 +159,176 @@ if [ "$EXTRACT_COUNT" -gt 0 ]; then
 fi
 
 # -----------------------------------------------------------
-# Step 3: Handle unified firmware (update.img)
+# Step 3: Handle GPT disk images (Radxa/Firefly GPT format)
+# -----------------------------------------------------------
+extract_from_gpt_image() {
+    local disk_img="$1"
+    echo "[*] Detected GPT disk image: $disk_img"
+    
+    # Install sfdisk if needed
+    command -v sfdisk &>/dev/null || apt-get install -y fdisk 2>/dev/null
+    
+    # List partitions
+    echo "[*] GPT partition table:"
+    sfdisk -l "$disk_img" 2>/dev/null | head -30
+    
+    # Try to extract each partition and look for Mali files
+    local partition_num=0
+    sfdisk -J "$disk_img" 2>/dev/null | python3 -c "
+import sys, json, subprocess, os, tempfile
+
+disk = '$disk_img'
+workdir = '$WORKDIR'
+outdir = '$OUTDIR'
+
+try:
+    data = json.load(sys.stdin)
+    parts = data.get('partitiontable', {}).get('partitions', [])
+except:
+    # Try reading raw sfdisk output
+    sys.exit(1)
+
+for i, p in enumerate(parts):
+    start = p.get('start', 0)
+    size = p.get('size', 0)
+    name = p.get('name', '').lower().strip()
+    fstype = p.get('type', '')
+    
+    print(f'Partition {i+1}: name=\"{p.get(\"name\",\"\")}\" start={start} size={size} type={fstype}')
+    
+    # Check if this might be vendor, system, or super partition
+    is_vendor = 'vendor' in name
+    is_system = 'system' in name and not is_vendor
+    is_super = 'super' in name
+    
+    if is_vendor or is_system or is_super:
+        print(f'  -> Extracting {name} partition...')
+        part_img = os.path.join(workdir, f'{name}.img')
+        
+        # Extract partition using dd
+        subprocess.run([
+            'dd', f'if={disk}', f'of={part_img}',
+            f'skip={start}', f'count={size}',
+            'bs=512', 'status=progress'
+        ], check=False)
+        
+        # Try to mount and extract
+        mnt = tempfile.mkdtemp(dir=workdir)
+        
+        mounted = False
+        for fstype_attempt in ['ext4', 'erofs', 'squashfs']:
+            if fstype_attempt == 'ext4':
+                result = subprocess.run(
+                    ['mount', '-o', 'loop,ro', part_img, mnt],
+                    capture_output=True, text=True, timeout=30
+                )
+            else:
+                result = subprocess.run(
+                    ['mount', '-o', 'loop,ro', '-t', fstype_attempt, part_img, mnt],
+                    capture_output=True, text=True, timeout=30
+                )
+            
+            if result.returncode == 0:
+                mounted = True
+                print(f'  -> Mounted as {fstype_attempt}')
+                break
+        
+        if not mounted:
+            # Try simg2img first (for sparse images)
+            raw_img = os.path.join(workdir, f'{name}_raw.img')
+            subprocess.run(['simg2img', part_img, raw_img], capture_output=True, timeout=30)
+            if os.path.exists(raw_img):
+                for fstype_attempt in ['ext4', 'erofs', 'squashfs']:
+                    if fstype_attempt == 'ext4':
+                        result = subprocess.run(
+                            ['mount', '-o', 'loop,ro', raw_img, mnt],
+                            capture_output=True, text=True, timeout=30
+                        )
+                    else:
+                        result = subprocess.run(
+                            ['mount', '-o', 'loop,ro', '-t', fstype_attempt, raw_img, mnt],
+                            capture_output=True, text=True, timeout=30
+                        )
+                    if result.returncode == 0:
+                        mounted = True
+                        print(f'  -> Mounted as {fstype_attempt} (after simg2img)')
+                        break
+        
+        if mounted:
+            # Look for Mali files
+            mali_dirs = [
+                os.path.join(mnt, 'vendor/lib64/egl'),
+                os.path.join(mnt, 'vendor/lib64/hw'),
+                os.path.join(mnt, 'vendor/etc/gralloc'),
+            ]
+            
+            found_files = []
+            for d in mali_dirs:
+                if os.path.exists(d):
+                    for root, dirs, files in os.walk(d):
+                        for f in files:
+                            full = os.path.join(root, f)
+                            rel = os.path.relpath(full, mnt)
+                            # Only copy Mali-related files
+                            if any(k in f.lower() for k in ['mali', 'bifrost', 'gralloc', 'hwcomposer', 'rockchip']):
+                                dst = os.path.join(outdir, rel)
+                                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                                subprocess.run(['cp', '-v', full, dst])
+                                found_files.append(rel)
+            
+            # Also search more broadly
+            for root, dirs, files in os.walk(mnt):
+                for f in files:
+                    if any(k in f.lower() for k in ['mali', 'bifrost']):
+                        full = os.path.join(root, f)
+                        rel = os.path.relpath(full, mnt)
+                        dst = os.path.join(outdir, rel)
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        subprocess.run(['cp', '-v', full, dst])
+                        found_files.append(rel)
+            
+            if found_files:
+                print(f'  -> Found {len(found_files)} Mali-related files')
+                for ff in found_files:
+                    print(f'      {ff}')
+            
+            subprocess.run(['umount', mnt], capture_output=True)
+        
+        os.rmdir(mnt)
+    
+    # Also check for super.img (logical partitions)
+    if 'super' in name:
+        print('  -> super partition found, may need lpunpack for logical volumes')
+        print(f'  -> Saving super image for later processing')
+        part_img = os.path.join(workdir, f'{name}.img')
+        subprocess.run([
+            'dd', f'if={disk}', f'of={part_img}',
+            f'skip={start}', f'count={size}',
+            'bs=512', 'status=progress'
+        ], check=False)
+" 2>&1 || true
+    
+    # Check if super.img was extracted and needs lpunpack
+    if [ -f "$WORKDIR/super.img" ]; then
+        echo "[*] Attempting to process super partition with lpunpack..."
+        command -v lpunpack &>/dev/null || {
+            echo "[!] lpunpack not available, installing..."
+            apt-get install -y android-tools-fsutils 2>/dev/null || true
+        }
+        if command -v lpunpack &>/dev/null; then
+            mkdir -p "$WORKDIR/super_extracted"
+            lpunpack "$WORKDIR/super.img" "$WORKDIR/super_extracted/" 2>/dev/null || true
+            for slot_img in "$WORKDIR/super_extracted"/*.img; do
+                [ -f "$slot_img" ] || continue
+                echo "[*] Processing $slot_img..."
+                extract_from_image "$slot_img"
+            done
+        fi
+    fi
+}
+
+# -----------------------------------------------------------
+# Step 4: Handle unified firmware (update.img)
 # Rockchip update.img contains concatenated partitions
 # -----------------------------------------------------------
 echo "[*] Trying to process as Rockchip update.img..."
@@ -182,7 +351,13 @@ if unzip -l "$FIRMWARE_PATH" &>/dev/null; then
     unzip -o "$FIRMWARE_PATH" -d "$WORKDIR/extracted/" 2>/dev/null || true
     for img in "$WORKDIR/extracted"/*.img; do
         [ -f "$img" ] || continue
-        extract_from_image "$img"
+        
+        # Check if it's a GPT disk image
+        if file "$img" | grep -qi "DOS/MBR boot sector\|GPT partition"; then
+            extract_from_gpt_image "$img"
+        else
+            extract_from_image "$img"
+        fi
     done
 fi
 
@@ -190,7 +365,16 @@ fi
 echo "[*] Searching for partition images..."
 find "$WORKDIR" -name "*.img" -type f 2>/dev/null | while read -r img; do
     [ "$img" = "$WORKDIR/raw.img" ] && continue
-    extract_from_image "$img"
+    
+    # Check if it's a GPT disk image (hasn't been processed yet)
+    if file "$img" | grep -qi "DOS/MBR boot sector\|GPT partition"; then
+        # Check if it was already processed from the extracted folder
+        if [[ "$img" != *"/extracted/"* ]]; then
+            extract_from_gpt_image "$img"
+        fi
+    else
+        extract_from_image "$img"
+    fi
 done
 
 # -----------------------------------------------------------

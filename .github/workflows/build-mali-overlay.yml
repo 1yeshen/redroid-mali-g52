@@ -167,7 +167,7 @@ jobs:
             type=raw,value=${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
 
       - name: Build and push Docker image
-        uses: docker/buildx-action@v3
+        uses: docker/build-push-action@v5
         id: build
         with:
           context: .
