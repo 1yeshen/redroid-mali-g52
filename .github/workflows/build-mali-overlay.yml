@@ -62,7 +62,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            wget unzip android-sdk-libsparse-utils e2tools file xz-utils \
+            wget unzip p7zip-full android-sdk-libsparse-utils e2tools file xz-utils \
             lz4 fdisk
           # Download lpunpack.py for extracting super partition logical volumes
           wget -q -O /usr/local/bin/lpunpack.py \
