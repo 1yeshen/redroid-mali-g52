@@ -44,7 +44,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             wget curl unzip p7zip-full \
-            android-sdk-libsparse-utils \
+            android-sdk-libsparse-utils android-sdk-lpadd \
             e2tools e2fsprogs \
             python3 python3-pip \
             fuse fuse2fs
@@ -63,26 +63,14 @@ jobs:
           URL="${{ github.event.inputs.firmware_url }}"
           echo "[*] Downloading firmware from: $URL"
           
-          # Common headers for koolcenter (requires Referer)
-          REFERER="https://fw0.koolcenter.com/AndroidNAS/easepi-r1/"
-          WGET_OPTS="-q --show-progress --timeout=120 --referer=$REFERER"
-          CURL_OPTS="-sL --connect-timeout 60 -H 'Referer: $REFERER'"
-          
-          # Try wget first
-          if wget $WGET_OPTS -O firmware.bin "$URL"; then
+          # Try wget first (with common headers)
+          if wget -q --show-progress --timeout=120 --referer="https://fw0.koolcenter.com/AndroidNAS/easepi-r1/" -O firmware.bin "$URL"; then
             echo "file=firmware.bin" >> $GITHUB_OUTPUT
-          elif curl $CURL_OPTS -o firmware.bin "$URL"; then
+          elif curl -sL --connect-timeout 60 -H "Referer: https://fw0.koolcenter.com/AndroidNAS/easepi-r1/" -o firmware.bin "$URL"; then
             echo "file=firmware.bin" >> $GITHUB_OUTPUT
           else
-            echo "[!] Direct download failed, trying without referer..."
-            if wget -q --show-progress --timeout=120 -O firmware.bin "$URL"; then
-              echo "file=firmware.bin" >> $GITHUB_OUTPUT
-            elif curl -sL --connect-timeout 60 -o firmware.bin "$URL"; then
-              echo "file=firmware.bin" >> $GITHUB_OUTPUT
-            else
-              echo "[!] Download failed"
-              exit 1
-            fi
+            echo "[!] Download failed"
+            exit 1
           fi
           
           ls -lh firmware.bin
@@ -110,35 +98,108 @@ jobs:
             echo "EXTRACTED_IMG=$FW_FILE" >> $GITHUB_ENV
           fi
 
-      - name: Unpack RKFW firmware
+      - name: Unpack firmware (RKFW + RKAF)
         run: |
+          # --------------------------------------------------
+          # Step 1: Unpack outer RKFW layer
+          # --------------------------------------------------
           echo "[*] Unpacking RKFW firmware..."
           mkdir -p rkfw_out
           
-          # Use afptool-rs to unpack
           afptool-rs unpack "$EXTRACTED_IMG" rkfw_out/ 2>&1 || true
           
           echo "[*] RKFW output:"
           ls -la rkfw_out/ || true
           
-          # Find embedded RKAF or partition images
+          # --------------------------------------------------
+          # Step 2: Check for nested RKAF container
+          # --------------------------------------------------
           for f in rkfw_out/*; do
             [ -f "$f" ] || continue
             MAGIC=$(dd if="$f" bs=4 count=1 2>/dev/null)
             echo "  $f ($(ls -lh "$f" | awk '{print $5}')): magic=$MAGIC"
+            
+            # If it's RKAF, unpack it again
+            if [ "$MAGIC" = "RKAF" ]; then
+              echo ""
+              echo "[*] Detected RKAF container, unpacking again..."
+              afptool-rs unpack "$f" rkfw_out/ 2>&1 || true
+              rm -f "$f"  # remove the nested container
+            fi
+          done
+          
+          # --------------------------------------------------
+          # Step 3: List final partition images
+          # --------------------------------------------------
+          echo ""
+          echo "[*] Final partition images:"
+          ls -la rkfw_out/
+          
+          for f in rkfw_out/*; do
+            [ -f "$f" ] || continue
+            echo "  $f: $(file "$f" | cut -d: -f2-)"
           done
 
       - name: Find and extract from partitions
         run: |
           mkdir -p mali_output/vendor
+          PART_DIR="rkfw_out"
           
-          # Process each partition found
-          for img in rkfw_out/*.img; do
+          # --------------------------------------------------
+          # Step 1: Handle Android dynamic partitions (super.img)
+          # --------------------------------------------------
+          if [ -f "$PART_DIR/super.img" ]; then
+            echo "[*] Detected super.img (Android dynamic partitions)"
+            SUPER_IMG="$PART_DIR/super.img"
+            
+            # Convert sparse to raw if needed
+            SUPER_RAW="$PART_DIR/super.raw"
+            if simg2img "$SUPER_IMG" "$SUPER_RAW" 2>/dev/null; then
+              echo "  -> Converted super.img from sparse to raw"
+              SUPER_IMG="$SUPER_RAW"
+            fi
+            
+            # Unpack with lpunpack
+            mkdir -p "$PART_DIR/dynamic"
+            if lpunpack "$SUPER_IMG" "$PART_DIR/dynamic/" 2>/dev/null; then
+              echo "  -> Unpacked dynamic partitions:"
+              ls -la "$PART_DIR/dynamic/"
+              # Add dynamic partitions to search path
+              for f in "$PART_DIR/dynamic"/*.img; do
+                [ -f "$f" ] && ln -sf "$f" "$PART_DIR/$(basename "$f")" 2>/dev/null || true
+              done
+            else
+              echo "  -> lpunpack failed (may not be super.img format)"
+            fi
+          fi
+          
+          # --------------------------------------------------
+          # Step 2: Also check for common partition naming
+          # --------------------------------------------------
+          # Sometimes partitions are just named super, vendor, system etc.
+          for name in vendor system product odm; do
+            for ext in img bin ""; do
+              fname="$name${ext:+.$ext}"
+              fpath="$PART_DIR/$fname"
+              [ -f "$fpath" ] || continue
+              # If it's a symlink (already handled above), skip
+              [ -L "$fpath" ] && continue
+              echo "[*] Found: $fpath"
+            done
+          done
+          
+          # --------------------------------------------------
+          # Step 3: Extract Mali files from each partition
+          # --------------------------------------------------
+          for img in "$PART_DIR"/*.img "$PART_DIR"/*.bin; do
             [ -f "$img" ] || continue
             base=$(basename "$img")
             echo ""
             echo "[*] Processing: $base ($(ls -lh "$img" | awk '{print $5}'))"
             file "$img"
+            
+            # Skip if it's a symlink (already handled)
+            [ -L "$img" ] && { echo "  -> Skipping symlink"; continue; }
             
             # Convert sparse to raw if needed
             RAW_IMG="$img.raw"
@@ -182,7 +243,7 @@ jobs:
             sudo umount mnt 2>/dev/null || true
             
             if [ $FOUND -gt 0 ]; then
-              echo "  => Found $FOUND Mali-related files"
+              echo "  => Found $FOUND Mali-related files in $base"
             fi
           done
 
