@@ -313,7 +313,9 @@ extract_mali_from_mount() {
         ["vendor/lib64/egl/libGLES_mali.so"]="Mali GPU userspace driver"
         ["vendor/lib64/hw/android.hardware.graphics.allocator@4.0-impl-bifrost.so"]="Gralloc HAL (Bifrost)"
         ["vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so"]="Mapper HAL (Bifrost)"
-        ["vendor/lib64/hw/hwcomposer.rockchip.so"]="Hardware Composer"
+        ["vendor/lib64/hw/hwcomposer.rockchip.so"]="Hardware Composer (Rockchip)"
+        ["vendor/lib64/hw/hwcomposer.drm.so"]="Hardware Composer (DRM)"
+        ["vendor/lib64/hw/hwcomposer.waydroid.so"]="Hardware Composer (Waydroid)"
         ["vendor/etc/gralloc/capabilities.xml"]="Gralloc capabilities"
     )
 
@@ -342,7 +344,7 @@ extract_mali_from_mount() {
     # Also look for alternative paths (with and without vendor prefix)
     for search_path in "$mount_point/vendor" "$mount_point"; do
         if [ -d "$search_path" ]; then
-            for path in $(find "$search_path" \( -name "*mali*" -o -name "*bifrost*" -o -name "*rockchip*gralloc*" -o -name "*hwcomposer*rockchip*" \) 2>/dev/null | head -30); do
+            for path in $(find "$search_path" \( -name "*mali*" -o -name "*bifrost*" -o -name "*rockchip*gralloc*" -o -name "*hwcomposer*" \) 2>/dev/null | head -50); do
                 rel_path="${path#$mount_point/}"
                 # Reconstruct with vendor/ prefix for consistent output
                 if [[ "$rel_path" != vendor/* ]]; then
