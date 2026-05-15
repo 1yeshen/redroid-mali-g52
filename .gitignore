@@ -1,0 +1,23 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.img
+*.iso
+*.raw
+firmware/
+output/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# Logs
+*.log

@@ -1,0 +1,152 @@
+# ============================================================
+# build-aosp-full.yml
+#
+# Full AOSP build of redroid with Mali-G52 GPU HAL for RK3568.
+# WARNING: Requires ~80GB disk and ~5 hours build time.
+# Use GitHub larger runner (paid) or self-hosted runner.
+#
+# Runner requirements:
+#   - runs-on: ubuntu-latest (4-core, 14GB disk - WILL NOT WORK)
+#   - runs-on: ubuntu-24.04-8core (8-core, 32GB disk - MAY NOT BE ENOUGH)
+#   - GitHub hosted larger runner: 16-core/64GB/300GB disk (RECOMMENDED)
+# ============================================================
+
+name: Build AOSP (Full) - Mali-G52
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android version'
+        required: false
+        default: '14.0.0'
+        type: choice
+        options:
+          - '12.0.0'
+          - '14.0.0'
+      runner_size:
+        description: 'GitHub runner size'
+        required: false
+        default: 'ubuntu-24.04-8core'
+        type: choice
+        options:
+          - 'ubuntu-24.04-8core'
+          - 'ubuntu-24.04-16core'
+      push_to_ghcr:
+        description: 'Push image to GHCR'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  ANDROID_VERSION: ${{ github.event.inputs.android_version || '14.0.0' }}
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner_size || 'ubuntu-24.04-8core' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          # Remove unnecessary pre-installed tools
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/share/boost
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            libncurses5-dev libncursesw5-dev xz-utils libssl-dev bc \
+            libgcc1 libc6-dev-i386 lib32ncurses5-dev libx11-dev \
+            lib32z-dev libgl1-mesa-dev xsltproc unzip python3 python3-pip \
+            repo android-sdk-libsparse-utils
+
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Initialize AOSP repo
+        run: |
+          mkdir -p aosp
+          cd aosp
+          repo init -u https://github.com/redroid-rockchip/platform_manifests.git \
+            -b redroid-${{ env.ANDROID_VERSION }} --depth=1
+
+      - name: Sync AOSP source
+        run: |
+          cd aosp
+          repo sync -c -j$(nproc) --no-clone-bundle 2>&1
+
+      - name: Set up build environment
+        run: |
+          cd aosp
+          source build/envsetup.sh
+          lunch redroid_arm64-userdebug
+          export TARGET_BOARD_PLATFORM_GPU=mali-G52
+          export TARGET_RK_GRALLOC_VERSION=4
+
+      - name: Build AOSP
+        run: |
+          cd aosp
+          source build/envsetup.sh
+          lunch redroid_arm64-userdebug
+          export TARGET_BOARD_PLATFORM_GPU=mali-G52
+          export TARGET_RK_GRALLOC_VERSION=4
+          m -j$(nproc) 2>&1 | tee build.log
+
+      - name: Create Docker image from build output
+        run: |
+          cd aosp
+          # Create Docker image from AOSP build
+          make -j$(nproc) redroid-docker 2>&1 | tee docker-build.log
+
+          # Save Docker image
+          docker images | grep redroid
+          docker tag redroid/redroid:${{ env.ANDROID_VERSION }} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.ANDROID_VERSION }}-mali-g52
+
+      - name: Log in to GHCR
+        if: ${{ github.event.inputs.push_to_ghcr != 'false' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Docker image
+        if: ${{ github.event.inputs.push_to_ghcr != 'false' }}
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.ANDROID_VERSION }}-mali-g52
+
+      - name: Build summary
+        run: |
+          echo "## ✅ Full AOSP Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Android version | ${{ env.ANDROID_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU config | mali-G52 (Bifrost) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gralloc version | 4 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner | ${{ github.event.inputs.runner_size }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image tag | \`${{ env.ANDROID_VERSION }}-mali-g52\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage on EasePi R1" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'docker run -d --privileged \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/mali0:/dev/mali0 \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/rga:/dev/rga \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/dri/card0:/dev/dri/card0 \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/mpp_service:/dev/mpp_service \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/binderfs:/dev/binderfs \' >> $GITHUB_STEP_SUMMARY
+          echo '  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.ANDROID_VERSION }}-mali-g52' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

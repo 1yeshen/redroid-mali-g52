@@ -1,0 +1,23 @@
+# ============================================================
+# Rockchip Mali GPU HAL initialization for redroid
+# ============================================================
+
+on early-init
+    # Mali GPU device nodes (mapped from host)
+    chmod 0666 /dev/mali0
+    chmod 0666 /dev/rga
+    chmod 0666 /dev/mpp_service
+    chmod 0666 /dev/dri/card0
+
+on boot
+    # Set Mali GPU properties
+    setprop ro.hardware.gralloc bifrost
+    setprop ro.hardware.hwcomposer rockchip
+    setprop ro.boot.gpu_mode mali
+
+    # Mali GPU HAL services will be started by hwservicemanager
+    # when it detects the .so implementation files
+
+on property:sys.boot_completed=1
+    # Log GPU info after boot
+    exec u:r:shell:s0 -- /system/bin/log -t MaliGPU -p i "Mali-G52 GPU HAL initialized"

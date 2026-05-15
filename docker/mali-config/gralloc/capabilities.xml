@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Gralloc capabilities configuration for Rockchip Mali-Bifrost GPU
+  Mali-G52 (Bifrost, r1p0) on RK3568
+-->
+<gralloc>
+    <version>4</version>
+    <gpu>
+        <architecture>bifrost</architecture>
+        <model>mali-G52</model>
+        <revision>r1p0</revision>
+    </gpu>
+    <capabilities>
+        <max_buffer_size>4096x4096</max_buffer_size>
+        <supported_pixel_formats>
+            <format>RGBA_8888</format>
+            <format>RGBX_8888</format>
+            <format>RGB_888</format>
+            <format>NV12</format>
+            <format>NV21</format>
+            <format>YV12</format>
+            <format>IMC2</format>
+        </supported_pixel_formats>
+        <feature>AFBC</feature>
+        <feature>BUFFER_COMPRESSION</feature>
+    </capabilities>
+</gralloc>

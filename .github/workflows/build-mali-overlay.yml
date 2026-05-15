@@ -1,0 +1,254 @@
+# ============================================================
+# build-mali-overlay.yml
+#
+# Build a custom redroid Docker image with Mali-G52 GPU HAL
+# for RK3568 devices (EasePi R1, Radxa ROCK3A/B, etc.)
+#
+# Strategy: Extract Mali userspace drivers from RK3568 Android
+# firmware and overlay them onto the stock redroid image.
+# This avoids the ~80GB AOSP full build requirement.
+# ============================================================
+
+name: Build Mali-G52 Overlay
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: 'URL to RK3568 Android firmware (update.img or partition zip)'
+        required: false
+        default: ''
+        type: string
+      malibin_url:
+        description: 'URL to pre-extracted Mali binaries tarball (alternative to firmware)'
+        required: false
+        default: ''
+        type: string
+      redroid_version:
+        description: 'Base redroid image tag'
+        required: false
+        default: '14.0.0_64only-latest'
+        type: string
+      push_to_ghcr:
+        description: 'Push image to GitHub Container Registry'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'scripts/**'
+      - '.github/workflows/build-mali-overlay.yml'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # -----------------------------------------------------------
+  # Job 1: Extract Mali binaries from firmware
+  # -----------------------------------------------------------
+  extract-mali:
+    runs-on: ubuntu-latest
+    outputs:
+      mali_found: ${{ steps.check-mali.outputs.found }}
+      mali_artifact: mali-binaries
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            wget unzip simg2img e2tools file xz-utils
+
+      - name: Download firmware (if URL provided)
+        if: ${{ github.event.inputs.firmware_url != '' }}
+        run: |
+          mkdir -p firmware
+          wget -q --show-progress -O firmware/firmware.bin \
+            "${{ github.event.inputs.firmware_url }}"
+
+      - name: Download pre-extracted Mali binaries
+        if: ${{ github.event.inputs.malibin_url != '' }}
+        run: |
+          mkdir -p mali-binaries
+          wget -q --show-progress -O mali-binaries.tar.gz \
+            "${{ github.event.inputs.malibin_url }}"
+          tar -xzf mali-binaries.tar.gz -C mali-binaries/
+
+      - name: Process firmware and extract Mali drivers
+        if: ${{ github.event.inputs.firmware_url != '' }}
+        id: extract
+        run: |
+          mkdir -p output/mali
+          bash scripts/extract-mali-from-firmware.sh \
+            "$(pwd)/firmware/firmware.bin" \
+            "$(pwd)/output/mali"
+
+      - name: Check if Mali binaries were found
+        id: check-mali
+        run: |
+          if [ -f "output/mali/vendor/lib64/egl/libGLES_mali.so" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "[✓] Mali GPU driver extracted successfully!"
+            file output/mali/vendor/lib64/egl/libGLES_mali.so
+          elif [ -d "mali-binaries" ] && [ -f "mali-binaries/vendor/lib64/egl/libGLES_mali.so" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "[✓] Mali GPU driver found in pre-extracted binaries!"
+            mkdir -p output/mali
+            cp -rv mali-binaries/* output/mali/
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "[!] Mali GPU driver NOT found."
+            echo "    Directory contents:"
+            find output -type f 2>/dev/null | head -50 || true
+          fi
+
+      - name: Upload Mali binaries as artifact
+        if: steps.check-mali.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mali-binaries
+          path: output/mali/
+          retention-days: 7
+
+  # -----------------------------------------------------------
+  # Job 2: Build Docker overlay image
+  # -----------------------------------------------------------
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: extract-mali
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Mali binaries artifact
+        if: needs.extract-mali.outputs.mali_found == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: mali-binaries
+          path: mali-binaries/
+
+      - name: Verify Mali binaries
+        if: needs.extract-mali.outputs.mali_found == 'true'
+        run: |
+          echo "[*] Mali binaries to be included:"
+          find mali-binaries -type f -exec ls -lh {} \;
+          echo ""
+          echo "[*] libGLES_mali.so details:"
+          file mali-binaries/vendor/lib64/egl/libGLES_mali.so 2>/dev/null || echo "Not found!"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ github.event.inputs.push_to_ghcr != 'false' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=,format=short
+            type=raw,value=${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
+
+      - name: Build and push Docker image
+        uses: docker/buildx-action@v3
+        id: build
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
+            MALI_BINARIES_DIR=mali-binaries
+            BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ github.event.inputs.push_to_ghcr != 'false' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image summary
+        run: |
+          echo "## Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mali driver | ${{ needs.extract-mali.outputs.mali_found == 'true' && '✅ Found' || '❌ Not found' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Output image | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### How to use on EasePi R1 (RK3568)" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'docker run -d --privileged \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/mali0:/dev/mali0 \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/rga:/dev/rga \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/dri/card0:/dev/dri/card0 \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /dev/mpp_service:/dev/mpp_service \' >> $GITHUB_STEP_SUMMARY
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # -----------------------------------------------------------
+  # Job 3: Fallback - build even without Mali (pass-through)
+  # -----------------------------------------------------------
+  build-fallback:
+    runs-on: ubuntu-latest
+    if: ${{ needs.extract-mali.outputs.mali_found == 'false' }}
+    needs: extract-mali
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build fallback passthrough image
+        run: |
+          echo "## ⚠️ Mali Binaries Not Found" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The firmware extraction did not yield Mali GPU binaries." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Possible reasons:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Firmware URL is invalid or unreachable" >> $GITHUB_STEP_SUMMARY
+          echo "2. Firmware does not contain Mali-G52 binaries" >> $GITHUB_STEP_SUMMARY
+          echo "3. The extraction script needs updating for this firmware format" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Provide a different firmware URL via workflow_dispatch" >> $GITHUB_STEP_SUMMARY
+          echo "2. Or provide pre-extracted Mali binaries as a tarball URL" >> $GITHUB_STEP_SUMMARY
+          echo "3. Or manually extract and push using the instructions in README.md" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build minimal compatibility image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
+            BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-${{ github.sha }}
+          push: false
