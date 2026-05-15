@@ -1,0 +1,234 @@
+# ============================================================
+# extract-mali-from-firmware.yml
+#
+# Extract Mali-G52 userspace GPU drivers from RK3568 Android
+# firmware (update.img) and produce updated mali-binaries/
+# for the overlay build workflow.
+#
+# Trigger: workflow_dispatch with firmware URL
+# ============================================================
+
+name: Extract Mali from Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: 'URL to RK3568 Android firmware (update.img or .7z)'
+        required: true
+        type: string
+      commit_extracted:
+        description: 'Commit extracted Mali binaries to repo'
+        required: false
+        default: true
+        type: boolean
+      commit_message:
+        description: 'Custom commit message (optional)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            wget curl unzip p7zip-full \
+            android-sdk-libsparse-utils \
+            e2tools e2fsprogs \
+            python3 python3-pip \
+            fuse fuse2fs
+          # Install Rust + afptool-rs for firmware unpacking
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          git clone https://github.com/suyulin/apftool-rs.git /tmp/apftool-rs
+          cd /tmp/apftool-rs
+          cargo build --release
+          sudo cp target/release/afptool-rs /usr/local/bin/
+          rm -rf /tmp/apftool-rs
+
+      - name: Download firmware
+        id: download
+        run: |
+          URL="${{ github.event.inputs.firmware_url }}"
+          echo "[*] Downloading firmware from: $URL"
+          
+          # Try direct download first
+          if wget -q --show-progress --timeout=120 -O firmware.bin "$URL"; then
+            echo "file=firmware.bin" >> $GITHUB_OUTPUT
+          elif curl -sL --connect-timeout 60 -o firmware.bin "$URL"; then
+            echo "file=firmware.bin" >> $GITHUB_OUTPUT
+          else
+            echo "[!] Download failed"
+            exit 1
+          fi
+          
+          ls -lh firmware.bin
+          file firmware.bin
+
+      - name: Extract from archive (if .7z or .zip)
+        run: |
+          FW_FILE="${{ steps.download.outputs.file }}"
+          if file "$FW_FILE" | grep -qi "7-zip\|7z\|zip"; then
+            echo "[*] Detected archive, extracting..."
+            mkdir -p archive_out
+            if file "$FW_FILE" | grep -qi "7-zip"; then
+              7z x "$FW_FILE" -oarchive_out/ -y
+            else
+              unzip -o "$FW_FILE" -d archive_out/
+            fi
+            
+            # Find the update.img inside
+            IMG_FILE=$(find archive_out -name "*.img" -type f | head -1)
+            if [ -n "$IMG_FILE" ]; then
+              cp "$IMG_FILE" firmware_extracted.img
+              echo "EXTRACTED_IMG=firmware_extracted.img" >> $GITHUB_ENV
+            fi
+          else
+            echo "EXTRACTED_IMG=$FW_FILE" >> $GITHUB_ENV
+          fi
+
+      - name: Unpack RKFW firmware
+        run: |
+          echo "[*] Unpacking RKFW firmware..."
+          mkdir -p rkfw_out
+          
+          # Use afptool-rs to unpack
+          afptool-rs unpack "$EXTRACTED_IMG" rkfw_out/ 2>&1 || true
+          
+          echo "[*] RKFW output:"
+          ls -la rkfw_out/ || true
+          
+          # Find embedded RKAF or partition images
+          for f in rkfw_out/*; do
+            [ -f "$f" ] || continue
+            MAGIC=$(dd if="$f" bs=4 count=1 2>/dev/null)
+            echo "  $f ($(ls -lh "$f" | awk '{print $5}')): magic=$MAGIC"
+          done
+
+      - name: Find and extract from partitions
+        run: |
+          mkdir -p mali_output/vendor
+          
+          # Process each partition found
+          for img in rkfw_out/*.img; do
+            [ -f "$img" ] || continue
+            base=$(basename "$img")
+            echo ""
+            echo "[*] Processing: $base ($(ls -lh "$img" | awk '{print $5}'))"
+            file "$img"
+            
+            # Convert sparse to raw if needed
+            RAW_IMG="$img.raw"
+            if simg2img "$img" "$RAW_IMG" 2>/dev/null; then
+              echo "  -> Converted from sparse to raw"
+              mount_candidate="$RAW_IMG"
+            else
+              mount_candidate="$img"
+            fi
+            
+            # Try to mount and extract Mali files
+            mkdir -p mnt
+            
+            # Try ext4
+            if sudo mount -o loop,ro "$mount_candidate" mnt 2>/dev/null; then
+              echo "  -> Mounted as ext4"
+            # Try erofs
+            elif sudo mount -o loop,ro -t erofs "$mount_candidate" mnt 2>/dev/null; then
+              echo "  -> Mounted as erofs"
+            else
+              echo "  -> Cannot mount, skipping"
+              sudo umount mnt 2>/dev/null || true
+              continue
+            fi
+            
+            # Search for Mali files
+            FOUND=0
+            for search_dir in mnt/vendor mnt; do
+              if [ -d "$search_dir" ]; then
+                for path in $(find "$search_dir" \( -name "*mali*" -o -name "*bifrost*" -o -name "*gralloc*" -o -name "*hwcomposer*" \) -type f 2>/dev/null); do
+                  REL="${path#mnt/}"
+                  # Strip redundant vendor/ prefix
+                  DEST="mali_output/$REL"
+                  mkdir -p "$(dirname "$DEST")"
+                  cp -v "$path" "$DEST"
+                  FOUND=$((FOUND + 1))
+                done
+              fi
+            done
+            
+            sudo umount mnt 2>/dev/null || true
+            
+            if [ $FOUND -gt 0 ]; then
+              echo "  => Found $FOUND Mali-related files"
+            fi
+          done
+
+      - name: Check extraction results
+        run: |
+          echo "=== Extracted files ==="
+          find mali_output -type f | sort
+          echo ""
+          echo "=== libGLES_mali.so ==="
+          if [ -f mali_output/vendor/lib64/egl/libGLES_mali.so ]; then
+            file mali_output/vendor/lib64/egl/libGLES_mali.so
+            ls -lh mali_output/vendor/lib64/egl/libGLES_mali.so
+            
+            # Check Mali DDK version
+            echo ""
+            echo "=== Mali DDK version ==="
+            strings mali_output/vendor/lib64/egl/libGLES_mali.so | grep -E "arm_release_ver|rk_so_ver|g[0-9]+p[0-9]" | head -5
+          else
+            echo "[!] libGLES_mali.so NOT found!"
+            find mali_output -name "*.so" | head -20
+          fi
+
+      - name: Upload extracted Mali binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mali-binaries
+          path: mali_output/
+
+      - name: Commit extracted Mali binaries to repo
+        if: ${{ github.event.inputs.commit_extracted == 'true' && hashFiles('mali_output/vendor/lib64/egl/libGLES_mali.so') != '' }}
+        run: |
+          # Prepare mali-binaries directory
+          rm -rf mali-binaries
+          mkdir -p mali-binaries
+          
+          if [ -d "mali_output/vendor" ]; then
+            cp -rv mali_output/vendor mali-binaries/
+          fi
+          
+          # Check if anything changed
+          git add mali-binaries/
+          
+          if git diff --cached --quiet; then
+            echo "[!] No changes to commit"
+            exit 0
+          fi
+          
+          # Configure git
+          git config user.name "Mali Extractor Bot"
+          git config user.email "bot@github.com"
+          
+          # Commit message
+          MSG="${{ github.event.inputs.commit_message }}"
+          if [ -z "$MSG" ]; then
+            MSG="Update Mali-G52 drivers from firmware extraction"
+          fi
+          
+          git commit -m "$MSG" -m "Extracted from: ${{ github.event.inputs.firmware_url }}"
+          git push
+          
+          echo "[✓] Mali binaries committed to repo"

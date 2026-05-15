@@ -49,9 +49,20 @@ RUN set -e; \
         cp -rv /mali-config/* /vendor/ 2>/dev/null || true; \
     fi; \
     \
+    # Create EGL symlinks for Mali (Android EGL loader looks for libEGL_<value>.so) \
+    echo "[*] Creating Mali EGL symlinks..."; \
+    if [ -f /vendor/lib64/egl/libGLES_mali.so ]; then \
+        ln -sf libGLES_mali.so /vendor/lib64/egl/libEGL_mali.so; \
+        ln -sf libGLES_mali.so /vendor/lib64/egl/libGLESv1_CM_mali.so; \
+        ln -sf libGLES_mali.so /vendor/lib64/egl/libGLESv2_mali.so; \
+        echo "[✓] EGL symlinks created"; \
+    else \
+        echo "[!] libGLES_mali.so not found, skipping symlinks"; \
+    fi; \
+    \
     # Show what was prepared \
     echo "[*] Files in /vendor/:"; \
-    find /vendor -type f -exec ls -lh {} \; 2>/dev/null | head -20; \
+    find /vendor -type f -o -type l | sort | while read f; do ls -lh "$f" 2>/dev/null; done; \
     echo "[✓] Mali files prepared successfully"
 
 # -----------------------------------------------------------

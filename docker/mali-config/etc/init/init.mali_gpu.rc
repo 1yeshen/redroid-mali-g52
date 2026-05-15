@@ -1,0 +1,20 @@
+# ============================================================
+# Mali GPU initialization for RK3568 (redroid)
+# Overrides gpu_config.sh defaults to use Mali EGL/gralloc
+# ============================================================
+
+on early-init
+    chmod 0666 /dev/mali0
+    chmod 0666 /dev/rga
+    chmod 0666 /dev/dri/card0
+    chmod 0666 /dev/mpp_service
+
+on boot
+    # Set Mali GPU properties (overrides gpu_config.sh defaults)
+    setprop ro.hardware.egl mali
+    setprop ro.hardware.gralloc bifrost
+    setprop ro.hardware.vulkan mali
+    setprop ro.boot.redroid_fps 30
+    
+    # Log Mali initialization
+    exec u:r:shell:s0 -- /system/bin/log -t MaliGPU -p i "Mali-G52 GPU HAL initialized"
