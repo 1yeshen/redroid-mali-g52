@@ -178,8 +178,6 @@ jobs:
           file: docker/Dockerfile
           build-args: |
             REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
-            MALI_BINARIES_DIR=mali-binaries
-            BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event.inputs.push_to_ghcr != 'false' }}
