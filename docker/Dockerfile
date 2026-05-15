@@ -36,6 +36,9 @@ COPY docker/mali-config/ /mali-config/
 RUN set -e; \
     echo "[*] Preparing Mali GPU driver files..."; \
     \
+    # Create /vendor directory (Alpine doesn't have it by default) \
+    mkdir -p /vendor; \
+    \
     # Copy vendor files preserving directory structure \
     if [ -d /mali-src/vendor ]; then \
         cp -rv /mali-src/vendor/* /vendor/ 2>/dev/null || true; \
