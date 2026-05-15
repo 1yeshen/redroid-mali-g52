@@ -62,7 +62,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            wget unzip simg2img e2tools file xz-utils
+            wget unzip android-sdk-libsparse-utils e2tools file xz-utils \
+            lz4
 
       - name: Download firmware (if URL provided)
         if: ${{ github.event.inputs.firmware_url != '' }}
