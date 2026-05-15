@@ -19,6 +19,10 @@
 # (containing vendor/lib64/egl/libGLES_mali.so etc.)
 # ============================================================
 
+# ARG must be declared at the top level (before any FROM) to be
+# available to all stages via --build-arg or default value.
+ARG REDROID_BASE=redroid/redroid:14.0.0-latest
+
 # -----------------------------------------------------------
 # Stage 1: Arrange Mali files using a standard Linux image
 # -----------------------------------------------------------
@@ -50,7 +54,6 @@ RUN set -e; \
 # -----------------------------------------------------------
 # Stage 2: Final redroid image with Mali drivers
 # -----------------------------------------------------------
-ARG REDROID_BASE=redroid/redroid:14.0.0-latest
 FROM $REDROID_BASE
 
 # Copy pre-arranged Mali files from Stage 1 (no shell needed in this image)
