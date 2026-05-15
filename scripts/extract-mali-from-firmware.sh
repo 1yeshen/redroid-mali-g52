@@ -76,7 +76,19 @@ extract_mali_from_mount() {
     )
 
     for path in "${!MALI_FILES[@]}"; do
+        # Try with vendor prefix (when mounted as full system)
         src="$mount_point/$path"
+        if [ -f "$src" ]; then
+            dst="$out/$path"
+            mkdir -p "$(dirname "$dst")"
+            cp -v "$src" "$dst"
+            found=$((found + 1))
+            continue
+        fi
+        
+        # Try without vendor prefix (when mounted as vendor partition directly)
+        local alt_path="${path#vendor/}"
+        src="$mount_point/$alt_path"
         if [ -f "$src" ]; then
             dst="$out/$path"
             mkdir -p "$(dirname "$dst")"
@@ -85,13 +97,21 @@ extract_mali_from_mount() {
         fi
     done
 
-    # Also look for alternative paths
-    for path in $(find "$mount_point/vendor" -name "*mali*" -o -name "*bifrost*" -o -name "*rockchip*gralloc*" 2>/dev/null | head -20); do
-        rel_path="${path#$mount_point/}"
-        dst="$out/$rel_path"
-        mkdir -p "$(dirname "$dst")"
-        cp -v "$path" "$dst"
-        found=$((found + 1))
+    # Also look for alternative paths (with and without vendor prefix)
+    for search_path in "$mount_point/vendor" "$mount_point"; do
+        if [ -d "$search_path" ]; then
+            for path in $(find "$search_path" \( -name "*mali*" -o -name "*bifrost*" -o -name "*rockchip*gralloc*" -o -name "*hwcomposer*rockchip*" \) 2>/dev/null | head -30); do
+                rel_path="${path#$mount_point/}"
+                # Reconstruct with vendor/ prefix for consistent output
+                if [[ "$rel_path" != vendor/* ]]; then
+                    rel_path="vendor/$rel_path"
+                fi
+                dst="$out/$rel_path"
+                mkdir -p "$(dirname "$dst")"
+                cp -v "$path" "$dst"
+                found=$((found + 1))
+            done
+        fi
     done
 
     return $found
@@ -118,29 +138,29 @@ extract_from_image() {
 
     # Try to mount as ext4
     mkdir -p "$WORKDIR/mnt"
-    if mount -o loop,ro "$WORKDIR/raw.img" "$WORKDIR/mnt" 2>/dev/null; then
+    if sudo mount -o loop,ro "$WORKDIR/raw.img" "$WORKDIR/mnt" 2>/dev/null; then
         echo "[*] Mounted successfully as ext4"
         extract_mali_from_mount "$WORKDIR/mnt" "$OUTDIR"
         local count=$?
-        umount "$WORKDIR/mnt" 2>/dev/null || true
+        sudo umount "$WORKDIR/mnt" 2>/dev/null || true
         return $count
     fi
 
     # Try as erofs
-    if mount -o loop,ro -t erofs "$WORKDIR/raw.img" "$WORKDIR/mnt" 2>/dev/null; then
+    if sudo mount -o loop,ro -t erofs "$WORKDIR/raw.img" "$WORKDIR/mnt" 2>/dev/null; then
         echo "[*] Mounted successfully as erofs"
         extract_mali_from_mount "$WORKDIR/mnt" "$OUTDIR"
         local count=$?
-        umount "$WORKDIR/mnt" 2>/dev/null || true
+        sudo umount "$WORKDIR/mnt" 2>/dev/null || true
         return $count
     fi
 
     # Try as squashfs
-    if mount -o loop,ro -t squashfs "$WORKDIR/raw.img" "$WORKDIR/mnt" 2>/dev/null; then
+    if sudo mount -o loop,ro -t squashfs "$WORKDIR/raw.img" "$WORKDIR/mnt" 2>/dev/null; then
         echo "[*] Mounted successfully as squashfs"
         extract_mali_from_mount "$WORKDIR/mnt" "$OUTDIR"
         local count=$?
-        umount "$WORKDIR/mnt" 2>/dev/null || true
+        sudo umount "$WORKDIR/mnt" 2>/dev/null || true
         return $count
     fi
 
@@ -219,12 +239,12 @@ for i, p in enumerate(parts):
         for fstype_attempt in ['ext4', 'erofs', 'squashfs']:
             if fstype_attempt == 'ext4':
                 result = subprocess.run(
-                    ['mount', '-o', 'loop,ro', part_img, mnt],
+                    ['sudo', 'mount', '-o', 'loop,ro', part_img, mnt],
                     capture_output=True, text=True, timeout=30
                 )
             else:
                 result = subprocess.run(
-                    ['mount', '-o', 'loop,ro', '-t', fstype_attempt, part_img, mnt],
+                    ['sudo', 'mount', '-o', 'loop,ro', '-t', fstype_attempt, part_img, mnt],
                     capture_output=True, text=True, timeout=30
                 )
             
@@ -241,12 +261,12 @@ for i, p in enumerate(parts):
                 for fstype_attempt in ['ext4', 'erofs', 'squashfs']:
                     if fstype_attempt == 'ext4':
                         result = subprocess.run(
-                            ['mount', '-o', 'loop,ro', raw_img, mnt],
+                            ['sudo', 'mount', '-o', 'loop,ro', raw_img, mnt],
                             capture_output=True, text=True, timeout=30
                         )
                     else:
                         result = subprocess.run(
-                            ['mount', '-o', 'loop,ro', '-t', fstype_attempt, raw_img, mnt],
+                            ['sudo', 'mount', '-o', 'loop,ro', '-t', fstype_attempt, raw_img, mnt],
                             capture_output=True, text=True, timeout=30
                         )
                     if result.returncode == 0:
@@ -292,7 +312,7 @@ for i, p in enumerate(parts):
                 for ff in found_files:
                     print(f'      {ff}')
             
-            subprocess.run(['umount', mnt], capture_output=True)
+            subprocess.run(['sudo', 'umount', mnt], capture_output=True)
         
         os.rmdir(mnt)
     
