@@ -1,0 +1,83 @@
+redroid-mali-g52 — 附加专利授权
+==================================
+
+版权所有 (C) 2026  1yeshen
+
+本文件依据 GNU General Public License v3.0 第 7 节（Additional Terms）
+提供附加的专利授权条款，作为 GPL-3.0 许可的补充。如本文件条款与
+GPL-3.0 冲突，以本文件为准。
+
+────────────────────────────────────────────
+
+1. 专利授权
+
+   项目贡献者（"贡献者"）特此授予您一项永久的、全球范围内的、非独占的、
+   免许可费的、不可撤销的（除本文件第 2 条规定外）专利许可：允许您
+   在本项目软件（"本软件"）所涉及的范围内，制造、使用、销售、许诺销售、
+   进口、复制、修改、分发、以及以其他方式运行本软件。
+
+2. 专利诉讼终止条款
+
+   如果您直接或间接地对任何实体（包括在诉讼中提起反诉或交叉请求）提起
+   专利侵权诉讼，指控本软件、本软件的衍生作品、或与本软件结合使用的
+   任何作品构成直接或间接的专利侵权，则本文件授予您的所有专利授权
+   **立即自动终止**，自该诉讼提起之日起生效。
+
+   上述终止不影响您根据 GPL-3.0 获得的版权许可（版权许可依据 GPL-3.0
+   自身的条款决定是否终止）。
+
+3. 定义
+
+   "专利侵权诉讼"包括但不限于：发明专利侵权诉讼、实用新型专利侵权诉讼、
+   以及任何主张专利权被侵犯的行政程序或国际贸易委员会程序。
+
+4. 免责声明
+
+   除本文件明确授权外，贡献者不授予任何明示或暗示的专利许可。
+   本软件按"原样"提供，不提供任何明示或暗示的担保。
+
+────────────────────────────────────────────
+
+redroid-mali-g52 — ADDITIONAL PATENT GRANT
+===========================================
+
+Copyright (C) 2026  1yeshen
+
+This document provides additional patent license terms as permitted by
+Section 7 of the GNU General Public License v3.0.  In case of conflict
+between this document and the GPL-3.0, this document prevails.
+
+────────────────────────────────────────────
+
+1. Patent Grant
+
+   Each contributor ("Contributor") hereby grants to you a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except
+   as stated in section 2 below) patent license to make, have made, use,
+   offer to sell, sell, import, transfer, copy, modify, distribute, and
+   otherwise run the contents of this software ("the Software").
+
+2. Patent Litigation Termination
+
+   If you initiate a patent infringement lawsuit against any entity
+   (including a cross-claim or counterclaim in a lawsuit) alleging that
+   the Software, a derivative work thereof, or any work combined with
+   the Software constitutes direct or contributory patent infringement,
+   then any and all patent grants granted to you under this document
+   shall **terminate automatically** as of the date such litigation is
+   filed.
+
+   Such termination does not affect your copyright license under the
+   GPL-3.0 (which is governed by its own terms).
+
+3. Definition
+
+   "Patent infringement lawsuit" includes but is not limited to: patent
+   infringement actions, utility model patent actions, and administrative
+   proceedings or ITC investigations alleging patent infringement.
+
+4. Disclaimer
+
+   Except for the express grants herein, no other patent licenses are
+   granted, whether by implication, estoppel or otherwise.  THE SOFTWARE
+   IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
