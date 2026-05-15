@@ -64,6 +64,180 @@ echo "[*] Firmware size: $(ls -lh "$FIRMWARE_PATH" | awk '{print $5}')"
 file "$FIRMWARE_PATH"
 
 # -----------------------------------------------------------
+# Step 1.5: Handle Rockchip RKFW/RKAF unified firmware format
+# -----------------------------------------------------------
+# RKFW format: starts with "RKFW" magic, contains a boot loader
+# and an embedded RKAF (Rockchip Android Firmware) image.
+# The RKAF image contains all partitions (system.img, vendor.img, etc.)
+unpack_rkfw() {
+    local fw_path="$1"
+    
+    # Check for RKFW magic (first 4 bytes)
+    local magic
+    magic=$(dd if="$fw_path" bs=4 count=1 2>/dev/null | tr -d '\0')
+    
+    if [ "$magic" != "RKFW" ]; then
+        return 1  # Not RKFW format, skip
+    fi
+
+    echo "[*] Detected Rockchip RKFW firmware format!"
+    echo "[*] This is a unified firmware wrapper containing an RKAF partition image."
+
+    # Download afptool-rs if needed (check PATH first, then cache)
+    local AFPTOOL_BIN=""
+    local AFPTOOL_CACHE="/tmp/afptool-rs"
+    
+    if command -v afptool-rs &>/dev/null; then
+        AFPTOOL_BIN=$(command -v afptool-rs)
+        echo "[*] Using system afptool-rs: $AFPTOOL_BIN"
+    elif [ -x "$AFPTOOL_CACHE" ]; then
+        AFPTOOL_BIN="$AFPTOOL_CACHE"
+        echo "[*] Using cached afptool-rs: $AFPTOOL_BIN"
+    else
+        echo "[*] Downloading afptool-rs (Rockchip firmware unpack tool)..."
+        local AFPTOOL_URL="https://github.com/suyulin/apftool-rs/releases/download/v1.2.0/afptool-rs-linux-x86_64.zip"
+        wget -q --show-progress --timeout=30 -O "$WORKDIR/afptool-rs.zip" "$AFPTOOL_URL" || {
+            echo "[!] Failed to download afptool-rs from GitHub"
+            echo "[!] Trying fallback URL..."
+            curl -sL --connect-timeout 30 -o "$WORKDIR/afptool-rs.zip" "$AFPTOOL_URL" || {
+                echo "[!] Cannot download afptool-rs, RKFW unpack will be skipped"
+                return 1
+            }
+        }
+        
+        echo "[*] Extracting afptool-rs..."
+        unzip -o "$WORKDIR/afptool-rs.zip" -d "$WORKDIR/afptool-rs-bin/" 2>/dev/null || {
+            echo "[!] Failed to extract afptool-rs.zip"
+            ls -la "$WORKDIR/afptool-rs.zip"
+            return 1
+        }
+        
+        # Find the binary (might be named afptool-rs or similar)
+        AFPTOOL_BIN=$(find "$WORKDIR/afptool-rs-bin" -type f \( -name "afptool-rs" -o -name "afptool-rs*" \) ! -name "*.zip" ! -name "*.md" 2>/dev/null | head -1)
+        
+        if [ -z "$AFPTOOL_BIN" ]; then
+            echo "[!] afptool-rs binary not found in extracted files"
+            find "$WORKDIR/afptool-rs-bin" -type f 2>/dev/null | head -20
+            return 1
+        fi
+        
+        chmod +x "$AFPTOOL_BIN"
+        echo "[*] afptool-rs ready: $AFPTOOL_BIN"
+        "$AFPTOOL_BIN" --help 2>&1 | head -5 || true
+        
+        # Cache for potential reuse
+        cp "$AFPTOOL_BIN" "$AFPTOOL_CACHE" 2>/dev/null || true
+    fi
+
+    # -----------------------------------------------------------
+    # Stage 1: Unpack RKFW wrapper → extract embedded RKAF image
+    # -----------------------------------------------------------
+    echo ""
+    echo "[*] === Stage 1: Unpack RKFW wrapper ==="
+    mkdir -p "$WORKDIR/rkfw_out"
+    
+    "$AFPTOOL_BIN" unpack "$fw_path" "$WORKDIR/rkfw_out" 2>&1
+    local rkfw_rc=$?
+    
+    if [ $rkfw_rc -ne 0 ]; then
+        echo "[!] afptool-rs RKFW unpack failed (exit code: $rkfw_rc)"
+        ls -la "$WORKDIR/rkfw_out/" 2>/dev/null || true
+        return 1
+    fi
+    
+    echo "[*] RKFW unpack output:"
+    ls -la "$WORKDIR/rkfw_out/" 2>/dev/null
+    
+    # Find the embedded RKAF image (usually named embedded-update.img or similar)
+    local embedded_img=""
+    for f in "$WORKDIR/rkfw_out"/*.img "$WORKDIR/rkfw_out"/*; do
+        [ -f "$f" ] || continue
+        local f_magic
+        f_magic=$(dd if="$f" bs=4 count=1 2>/dev/null | tr -d '\0')
+        if [ "$f_magic" = "RKAF" ]; then
+            embedded_img="$f"
+            echo "[*] Found embedded RKAF image: $f"
+            break
+        fi
+    done
+    
+    # If no RKAF magic found, try the largest .img file
+    if [ -z "$embedded_img" ]; then
+        echo "[*] No RKAF signature found, looking for largest .img file..."
+        embedded_img=$(find "$WORKDIR/rkfw_out" -name "*.img" -type f -printf "%s\t%p\n" 2>/dev/null | sort -n | tail -1 | cut -f2)
+        if [ -n "$embedded_img" ]; then
+            echo "[*] Using: $embedded_img ($(ls -lh "$embedded_img" | awk '{print $5}'))"
+        fi
+    fi
+    
+    if [ -z "$embedded_img" ]; then
+        echo "[!] No embedded RKAF image found in RKFW output"
+        return 1
+    fi
+
+    # -----------------------------------------------------------
+    # Stage 2: Unpack RKAF image → extract all partitions
+    # -----------------------------------------------------------
+    echo ""
+    echo "[*] === Stage 2: Unpack RKAF partition image ==="
+    mkdir -p "$WORKDIR/rkaf_out"
+    
+    "$AFPTOOL_BIN" unpack "$embedded_img" "$WORKDIR/rkaf_out" 2>&1
+    local rkaf_rc=$?
+    
+    if [ $rkaf_rc -ne 0 ]; then
+        echo "[!] afptool-rs RKAF unpack failed (exit code: $rkaf_rc)"
+        ls -la "$WORKDIR/rkaf_out/" 2>/dev/null || true
+        return 1
+    fi
+    
+    echo "[*] RKAF unpack output:"
+    ls -la "$WORKDIR/rkaf_out/" 2>/dev/null
+    
+    # -----------------------------------------------------------
+    # Stage 3: Copy partition images to WORKDIR for processing
+    # -----------------------------------------------------------
+    echo ""
+    echo "[*] === Stage 3: Collecting partition images ==="
+    
+    # Collect from main output directory
+    for img in "$WORKDIR/rkaf_out"/*.img; do
+        [ -f "$img" ] || continue
+        local base=$(basename "$img")
+        # Skip partition-metadata and other non-partition files
+        echo "[*] Found partition: $base ($(ls -lh "$img" | awk '{print $5}'))"
+        cp "$img" "$WORKDIR/$base"
+    done
+    
+    # Also check for Image/ subdirectory (common in RKAF layout)
+    if [ -d "$WORKDIR/rkaf_out/Image" ]; then
+        echo "[*] Found Image/ subdirectory:"
+        ls -la "$WORKDIR/rkaf_out/Image/"
+        for img in "$WORKDIR/rkaf_out/Image"/*.img; do
+            [ -f "$img" ] || continue
+            local base=$(basename "$img")
+            if [ ! -f "$WORKDIR/$base" ]; then
+                echo "[*] Found partition: Image/$base ($(ls -lh "$img" | awk '{print $5}'))"
+                cp "$img" "$WORKDIR/$base"
+            fi
+        done
+    fi
+    
+    echo ""
+    echo "[*] Partition images available for extraction:"
+    ls -lh "$WORKDIR/"*.img 2>/dev/null || echo "(none)"
+    
+    return 0
+}
+
+# Call RKFW unpacker
+unpack_rkfw "$FIRMWARE_PATH"
+RKFW_RC=$?
+if [ $RKFW_RC -eq 0 ]; then
+    echo "[✓] RKFW firmware unpacked successfully"
+fi
+
+# -----------------------------------------------------------
 # Step 2: Identify firmware type and extract
 # -----------------------------------------------------------
 FW_TYPE=$(file "$FIRMWARE_PATH")

@@ -68,6 +68,16 @@ jobs:
           wget -q -O /usr/local/bin/lpunpack.py \
             https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
           chmod +x /usr/local/bin/lpunpack.py
+          # Download afptool-rs for Rockchip RKFW/RKAF firmware unpacking
+          wget -q -O /tmp/afptool-rs.zip \
+            https://github.com/suyulin/apftool-rs/releases/download/v1.2.0/afptool-rs-linux-x86_64.zip
+          unzip -o /tmp/afptool-rs.zip -d /tmp/afptool-rs-bin/ 2>/dev/null
+          AFPTOOL_BIN=$(find /tmp/afptool-rs-bin -type f -name "afptool-rs*" ! -name "*.zip" ! -name "*.md" 2>/dev/null | head -1)
+          if [ -n "$AFPTOOL_BIN" ]; then
+            chmod +x "$AFPTOOL_BIN"
+            cp "$AFPTOOL_BIN" /usr/local/bin/afptool-rs
+            echo "[*] afptool-rs installed: $(afptool-rs --help 2>&1 | head -1)"
+          fi
 
       - name: Download firmware (if URL provided)
         if: ${{ github.event.inputs.firmware_url != '' }}
