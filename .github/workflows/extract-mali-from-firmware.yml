@@ -63,14 +63,26 @@ jobs:
           URL="${{ github.event.inputs.firmware_url }}"
           echo "[*] Downloading firmware from: $URL"
           
-          # Try direct download first
-          if wget -q --show-progress --timeout=120 -O firmware.bin "$URL"; then
+          # Common headers for koolcenter (requires Referer)
+          REFERER="https://fw0.koolcenter.com/AndroidNAS/easepi-r1/"
+          WGET_OPTS="-q --show-progress --timeout=120 --referer=$REFERER"
+          CURL_OPTS="-sL --connect-timeout 60 -H 'Referer: $REFERER'"
+          
+          # Try wget first
+          if wget $WGET_OPTS -O firmware.bin "$URL"; then
             echo "file=firmware.bin" >> $GITHUB_OUTPUT
-          elif curl -sL --connect-timeout 60 -o firmware.bin "$URL"; then
+          elif curl $CURL_OPTS -o firmware.bin "$URL"; then
             echo "file=firmware.bin" >> $GITHUB_OUTPUT
           else
-            echo "[!] Download failed"
-            exit 1
+            echo "[!] Direct download failed, trying without referer..."
+            if wget -q --show-progress --timeout=120 -O firmware.bin "$URL"; then
+              echo "file=firmware.bin" >> $GITHUB_OUTPUT
+            elif curl -sL --connect-timeout 60 -o firmware.bin "$URL"; then
+              echo "file=firmware.bin" >> $GITHUB_OUTPUT
+            else
+              echo "[!] Download failed"
+              exit 1
+            fi
           fi
           
           ls -lh firmware.bin
