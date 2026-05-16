@@ -1,10 +1,12 @@
 # ============================================================
 # analyze-mali-binaries.yml
 #
-# Reverse-engineering workflow: analyzes Mali GPU userspace
-# driver binaries committed to the repository. Dumps DDK
-# versions, ELF metadata, symbol tables, and dependency info
-# to help with compatibility assessment.
+# Multi-tool reverse-engineering workflow: analyzes Mali GPU
+# userspace driver binaries using the full binutils toolchain
+# (readelf, objdump, nm, strings, xxd) plus Python analysis.
+#
+# Produces per-file detailed analysis and cross-version
+# comparison in the CI summary.
 #
 # Trigger: manual dispatch or on push to mali-binaries paths
 # ============================================================
@@ -14,8 +16,8 @@ name: Analyze Mali Binaries
 on:
   workflow_dispatch:
     inputs:
-      verbose:
-        description: 'Verbose output (full symbol dump)'
+      full_symtab:
+        description: 'Dump full symbol table (can be very large)'
         required: false
         default: false
         type: boolean
@@ -31,19 +33,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install analysis tools
+      - name: Install full reverse-engineering toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq binutils file xxd
+          sudo apt-get install -y -qq \
+            binutils \
+            binutils-aarch64-linux-gnu \
+            file \
+            xxd \
+            python3-pip
 
       - name: Find all Mali .so files
         id: find-mali
         run: |
           find . -name "libGLES_mali.so" -type f | sort > mali_files.txt
           echo "found=$(wc -l < mali_files.txt)" >> $GITHUB_OUTPUT
-          echo "### Mali Driver Files Found" >> $GITHUB_STEP_SUMMARY
+          echo "### 📁 Mali Driver Files" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| # | File | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "| # | Path | Size |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
           count=0
           while IFS= read -r f; do
@@ -52,70 +59,291 @@ jobs:
             echo "| $count | \`$f\` | $size |" >> $GITHUB_STEP_SUMMARY
           done < mali_files.txt
 
-      - name: Analyze each Mali .so
+      # ===================================================
+      # Per-file deep analysis
+      # ===================================================
+      - name: '🔬 Deep Analysis: ELF Header + Program Headers'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
-            echo ""
-            echo "============================================"
-            echo "  Analyzing: $f"
-            echo "============================================"
-
-            # 1. File info
-            echo "--- [1] File Info ---"
-            file "$f"
-            ls -lh "$f"
-
-            # 2. ELF header
-            echo "--- [2] ELF Header ---"
-            readelf -h "$f" 2>/dev/null | grep -E "(Class|Machine|Entry)"
-
-            # 3. DDK version strings
-            echo "--- [3] DDK Version ---"
-            strings "$f" | grep -E "^g[0-9]+p[0-9]" | head -3
-            strings "$f" | grep "rk_so_ver" | head -3
-
-            # 4. Dynamic dependencies
-            echo "--- [4] NEEDED Libraries ---"
-            readelf -d "$f" 2>/dev/null | grep "NEEDED" | sed 's/.*\[\(.*\)\]/  \1/'
-
-            # 5. GPU architecture
-            echo "--- [5] GPU Architecture ---"
-            strings "$f" | grep -iE "(bifrost|valhall|midgard)" | sort -u | head -5
-
-            # 6. Build ID
-            echo "--- [6] Build ID ---"
-            readelf -n "$f" 2>/dev/null | grep "Build ID" || echo "(none)"
-
-            # 7. Symbol counts
-            echo "--- [7] Symbols ---"
-            total=$(nm -D "$f" 2>/dev/null | wc -l)
-            defined=$(nm -D "$f" 2>/dev/null | grep -cE " [TWA] ")
-            undefined=$(nm -D "$f" 2>/dev/null | grep -c " U ")
-            echo "Total: $total | Defined: $defined | Undefined (imports): $undefined"
-
-            # 8. Version references
-            echo "--- [8] Version References ---"
-            readelf -V "$f" 2>/dev/null | head -20 || echo "(none)"
-
-            # Step summary
-            ddk=$(strings "$f" | grep -E "^g[0-9]+p[0-9]" | head -1)
-            rk=$(strings "$f" | grep "rk_so_ver" | head -1)
-            echo "### File: \`$f\`" >> $GITHUB_STEP_SUMMARY
-            echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
-            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-            echo "| DDK | \`${ddk:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| rk_so_ver | \`${rk:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| Size | $(ls -lh "$f" | awk '{print $5}') |" >> $GITHUB_STEP_SUMMARY
-            echo "| Symbols | $total ($defined exported, $undefined imported) |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            name=$(basename $(dirname $(dirname $f)))
+            echo "===== $f ====="
+            echo ">>> readelf -h"
+            readelf -h "$f" 2>/dev/null
+            echo ">>> readelf -l (segments)"
+            readelf -l "$f" 2>/dev/null | head -30
           done < mali_files.txt
 
-      - name: Comparison table
+      - name: '🔬 Deep Analysis: Section Headers'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> readelf -S"
+            readelf -S "$f" 2>/dev/null
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: Dynamic Tags + NEEDED'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> readelf -d"
+            readelf -d "$f" 2>/dev/null
+            echo ""
+            echo ">>> SONAME"
+            readelf -d "$f" 2>/dev/null | grep SONAME || echo "(no SONAME)"
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: Version References (readelf -V)'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            readelf -V "$f" 2>/dev/null
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: Relocations'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> readelf -r"
+            readelf -r "$f" 2>/dev/null | head -50
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: Notes + Build ID'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> readelf -n"
+            readelf -n "$f" 2>/dev/null
+            echo ""
+            echo ">>> Android note (.note.android.ident)"
+            readelf -x .note.android.ident "$f" 2>/dev/null || readelf -n "$f" 2>/dev/null | grep -i android
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: Unwind Info'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> readelf -u (unwind)"
+            readelf -u "$f" 2>/dev/null | head -20 || echo "(no unwind or readelf -u not available)"
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: String-Based Reverse Engineering'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            name=$(basename $(dirname $(dirname $f)))
+            echo "===== $f ====="
+            # All version strings
+            echo ">>> ALL version strings"
+            strings "$f" | grep -iE "(version|release|build|git|ddk)" | grep -v "^$" | sort -u | head -30
+            # EGL/GLES function names
+            echo ""
+            echo ">>> EGL functions"
+            strings "$f" | grep -E "^egl[A-Z]" | sort -u | head -30
+            # GLES functions
+            echo ""
+            echo ">>> GLES functions"
+            strings "$f" | grep -E "^gl[A-Z]" | sort -u | head -30
+            # Vulkan functions
+            echo ""
+            echo ">>> Vulkan functions"
+            strings "$f" | grep -E "^vk[A-Z]" | sort -u | head -30
+            # Enums and constants
+            echo ""
+            echo ">>> EGL enums"
+            strings "$f" | grep -E "^EGL_" | sort -u | head -20
+            # File paths embedded
+            echo ""
+            echo ">>> Embedded file paths"
+            strings "$f" | grep -E "/(dev|sys|proc|vendor|system|data)" | sort -u | head -20
+            # Error messages
+            echo ""
+            echo ">>> Error messages"
+            strings "$f" | grep -iE "(error|fail|warn|assert|panic)" | sort -u | head -20
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: DDK/NOTE Hex Dump'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            # Find where the DDK string lives and dump around it
+            echo ">>> DDK version string hex location"
+            ddk_str=$(strings -t x "$f" | grep -E "^[0-9a-f]+ g[0-9]+p[0-9]" | head -1)
+            echo "$ddk_str"
+            offset=$(echo "$ddk_str" | awk '{print $1}')
+            if [ -n "$offset" ]; then
+                echo ""
+                echo ">>> Hex dump of DDK string area (offset 0x$offset)"
+                off_dec=$((16#$offset))
+                # Dump 64 bytes around the DDK string
+                xxd -s $((off_dec - 8)) -l 80 "$f" 2>/dev/null || echo "(xxd failed)"
+            fi
+            # rk_so_ver hex location
+            echo ""
+            echo ">>> rk_so_ver string hex location"
+            rk_str=$(strings -t x "$f" | grep "rk_so_ver" | head -1)
+            echo "$rk_str"
+            rk_off=$(echo "$rk_str" | awk '{print $1}')
+            if [ -n "$rk_off" ]; then
+                rk_dec=$((16#$rk_off))
+                echo "Hex dump around rk_so_ver:"
+                xxd -s $((rk_dec - 8)) -l 96 "$f" 2>/dev/null
+            fi
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: objdump Disassembly (EGL functions)'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            # Try ARM64 objdump
+            OBJDUMP="objdump"
+            if command -v aarch64-linux-gnu-objdump >/dev/null; then
+                OBJDUMP="aarch64-linux-gnu-objdump"
+            fi
+            
+            # Disassemble around key functions
+            echo ">>> eglCreateImageKHR target (search for xref)"
+            # Find the offset of eglCreateImageKHR
+            $OBJDUMP -T "$f" 2>/dev/null | grep -i "eglCreateImageKHR" | head -5
+            
+            echo ""
+            echo ">>> Top function names (sorted by size)"
+            $OBJDUMP -t "$f" 2>/dev/null | grep -E "\.text" | awk '{print $NF, $5}' | sort -k2 -rn | head -20
+            
+            echo ""
+            echo ">>> Code size estimate"
+            $OBJDUMP -h "$f" 2>/dev/null | grep -E "\.text" | awk '{print "Section:", $2, "Size:", $3}'
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: ELF Note + Android Target'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            # Try to get .note section content
+            for note in .note.android.ident .note.gnu.build-id .note .note.gnu.property; do
+                content=$(readelf -x "$note" "$f" 2>/dev/null)
+                if [ -n "$content" ]; then
+                    echo ">>> $note"
+                    echo "$content"
+                fi
+            done
+            # GNU property notes
+            echo ">>> readelf -n full"
+            readelf -n "$f" 2>/dev/null
+          done < mali_files.txt
+
+      - name: '🔬 Deep Analysis: Embedded Resource Strings'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            # GPU core names
+            echo ">>> GPU core names"
+            strings "$f" | grep -iE "gpu|core|shader|L2|cache|tiler" | sort -u | head -20
+            # Firmware-related
+            echo ""
+            echo ">>> Firmware-related strings"
+            strings "$f" | grep -iE "firmware|csffw|fw|mali_csf" | sort -u | head -10
+            # Memory management
+            echo ""
+            echo ">>> Memory management"
+            strings "$f" | grep -iE "alloc|mmu|page|memory|buffer|dma|ion|drm" | sort -u | head -20
+            # IOCTL numbers (for kernel interface)
+            echo ""
+            echo ">>> IOCTL / device interface"
+            strings "$f" | grep -iE "ioctl|mali|dev|node|fd|handle" | sort -u | head -20
+          done < mali_files.txt
+
+      # ===================================================
+      # Cross-version comparison
+      # ===================================================
+      - name: '📊 Cross-Version: Symbol Diff'
         if: steps.find-mali.outputs.found != '0'
         run: |
           python3 << 'PYEOF'
-          import subprocess, os, json, re
+          import subprocess, os, re
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          versions = {}
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              # Extract version name from path
+              path_parts = so_path.split("/")
+              # Find the version directory
+              for p in path_parts:
+                  if re.match(r'^mali-binaries', p) or re.match(r'^mali-binaries-g', p):
+                      versions[p] = so_path
+                      break
+          
+          if len(versions) < 2:
+              print("Need at least 2 versions to compare")
+              exit(0)
+          
+          print("## 📊 Cross-Version Symbol Analysis")
+          print("")
+          
+          # Compare symbols between versions
+          version_names = list(versions.keys())
+          for i in range(len(version_names)):
+              for j in range(i+1, len(version_names)):
+                  v1, p1 = version_names[i], versions[version_names[i]]
+                  v2, p2 = version_names[j], versions[version_names[j]]
+                  
+                  # Get exported symbols
+                  out1 = subprocess.run(["nm", "-D", p1], capture_output=True, text=True)
+                  out2 = subprocess.run(["nm", "-D", p2], capture_output=True, text=True)
+                  
+                  syms1 = set()
+                  syms2 = set()
+                  defined1 = {}
+                  defined2 = {}
+                  
+                  for line in out1.stdout.splitlines():
+                      parts = line.split()
+                      if len(parts) >= 3:
+                          syms1.add(parts[2])
+                          if parts[1] in "TWA":
+                              defined1[parts[2]] = parts[1]
+                  
+                  for line in out2.stdout.splitlines():
+                      parts = line.split()
+                      if len(parts) >= 3:
+                          syms2.add(parts[2])
+                          if parts[1] in "TWA":
+                              defined2[parts[2]] = parts[1]
+                  
+                  only_in_v1 = syms1 - syms2
+                  only_in_v2 = syms2 - syms1
+                  
+                  print(f"### {v1} vs {v2}")
+                  print("")
+                  print(f"- Total exported: {len(defined1)} vs {len(defined2)}")
+                  print(f"- Symbols unique to {v1}: {len(only_in_v1)}")
+                  print(f"- Symbols unique to {v2}: {len(only_in_v2)}")
+                  if only_in_v1:
+                      print(f"- Examples only in {v1}: `{'`, `'.join(list(only_in_v1)[:10])}`")
+                  if only_in_v2:
+                      print(f"- Examples only in {v2}: `{'`, `'.join(list(only_in_v2)[:10])}`")
+                  print("")
+          
+          PYEOF
+
+      - name: '📊 Cross-Version: Full DDK Matrix (Python)'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os, re
           
           with open("mali_files.txt") as f:
               files = [l.strip() for l in f if l.strip()]
@@ -124,50 +352,95 @@ jobs:
           for so_path in files:
               if not os.path.isfile(so_path): continue
               r = {"path": so_path}
+              
               out = subprocess.run(["strings", so_path], capture_output=True, text=True)
               for line in out.stdout.splitlines():
                   if re.match(r'^g\d+p\d', line.strip()):
-                      r["ddk"] = line.strip()
+                      if not r.get("ddk"): r["ddk"] = line.strip()
                   if "rk_so_ver" in line:
                       m = re.search(r"rk_so_ver.*'([^']+)'", line)
                       r["rk_so_ver"] = m.group(1) if m else line.strip()
-                  if not r.get("arch") and "Bifrost" in line:
-                      r["arch"] = "Bifrost"
-                  if not r.get("arch") and "Valhall" in line:
-                      r["arch"] = "Valhall"
+                  if not r.get("arch"):
+                      if "Bifrost" in line: r["arch"] = "Bifrost"
+                      if "Valhall" in line: r["arch"] = "Valhall"
+                  # Capture all DDK-related lines
+                  if "arm_release_ver" in line:
+                      r["release"] = line.strip()
+              
               r["size_mb"] = os.path.getsize(so_path) / (1024*1024)
               
               out = subprocess.run(["readelf", "-d", so_path], capture_output=True, text=True)
               needed = [line.split("[")[1].split("]")[0] for line in out.stdout.splitlines() if "NEEDED" in line]
-              r["needed_count"] = len(needed)
               r["needed"] = needed
+              r["needed_count"] = len(needed)
+              
+              out = subprocess.run(["readelf", "-h", so_path], capture_output=True, text=True)
+              for line in out.stdout.splitlines():
+                  if "Entry" in line: r["entry"] = line.split(":")[1].strip()
+              
+              out = subprocess.run(["readelf", "-S", so_path], capture_output=True, text=True)
+              text_size = 0
+              for line in out.stdout.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 6 and parts[1] == ".text":
+                      r["text_size"] = parts[4]
+              
+              out = subprocess.run(["nm", "-D", so_path], capture_output=True, text=True)
+              defined = sum(1 for l in out.stdout.splitlines() if len(l.split()) >= 3 and l.split()[1] in "TWA")
+              undefined = sum(1 for l in out.stdout.splitlines() if len(l.split()) >= 3 and l.split()[1] == "U")
+              r["symbols_defined"] = defined
+              r["symbols_undefined"] = undefined
+              r["symbols_total"] = defined + undefined
               
               results.append(r)
           
-          print("## DDK Compatibility Matrix")
+          # Summary table
+          print("## 📊 DDK Compatibility Matrix")
           print("")
-          print("| # | DDK | rk_so_ver | Size | Arch | Dependencies |")
-          print("|---|---|---|---|---|---|")
+          print("| # | Version | DDK | rk_so_ver | Size | Arch | Entry | .text | Exports| Imports| Dependencies |")
+          print("|---|---|---|---|---|---|---|---|---|---|---|")
           for i, r in enumerate(results):
               deps = ", ".join(r.get("needed", [])[:3])
               if r.get("needed_count", 0) > 3:
                   deps += f" ... +{r['needed_count']-3}"
-              print(f"| {i+1} | {r.get('ddk','?')} | {r.get('rk_so_ver','?')} | {r['size_mb']:.1f}MB | {r.get('arch','?')} | {deps} |")
-              print(f"| | | | | | `{' '.join(r.get('needed',[]))}` |")
+              path_short = r["path"].replace("./", "")
+              print(f"| {i+1} | {path_short} | {r.get('ddk','?')} | {r.get('rk_so_ver','?')} | {r['size_mb']:.1f}MB | {r.get('arch','?')} | {r.get('entry','?')} | {r.get('text_size','?')} | {r.get('symbols_defined','?')} | {r.get('symbols_undefined','?')} | {deps} |")
+          
+          # Full dependency listing
+          print("")
+          print("### Full Dependency Details")
+          print("")
+          for r in results:
+              path_short = r["path"].replace("./", "")
+              print(f"**{path_short}** ({r.get('ddk','?')})")
+              print("```")
+              for lib in r.get("needed", []):
+                  print(f"  {lib}")
+              print("```")
+              print("")
           
           print("")
-          print("### Kernel DDK: g18p0-01eac0")
-          print("| Userspace DDK | Gap | Expected Result |")
-          print("|---|---|---|")
-          print("| g15p0-g18p0 | 0-3 versions | ✅ Best match |")
-          print("| g13p0-g14p0 | 4-5 versions | ⚠️ May work (backward compat) |")
-          print("| g7p1 or older | 11+ versions | ❌ SIGSEGV (eglCreateImageKHR) |")
-          print("| g25p0 or newer | 7+ versions | ❌ Exit 129 (rk_so_ver too new) |")
+          print("### Kernel DDK: `g18p0-01eac0` (bifrost_kbase.ko)")
+          print("")
+          print("| Userspace DDK | Gap | Expected Result | Fix Needed |")
+          print("|---|---|---|---|")
+          print("| **g15p0 - g18p0** | 0-3 ver | ✅ Best match | None |")
+          print("| **g13p0 - g14p0** | 4-5 ver | ⚠️ May work | Minor compat |")
+          print("| **g7p1 or older** | 11+ ver | ❌ SIGSEGV (eglCreateImageKHR) | Need newer userspace |")
+          print("| **g25p0 or newer** | 7+ ver | ❌ Exit 129 (rk_so_ver) | Need older rk_so_ver |")
+          print("")
+          print("### Next Steps")
+          print("1. Find bionic Mali g13p0/g15p0 userspace driver")
+          print("2. Check Rockchip Android 12/13 SDK for matching DDK")
+          print("3. Test g7p1 with Android 11/12 base image")
+          print("4. Attempt rk_so_ver patch on g25p0 to reduce to 8 or 9")
+          
           PYEOF
 
-      - name: Upload results
+      - name: Upload full analysis artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mali-analysis
-          path: mali_files.txt
+          name: mali-full-analysis
+          path: |
+            mali_files.txt
           if-no-files-found: ignore
