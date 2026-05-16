@@ -16,43 +16,47 @@ or -ENOENT on RK3568/EasePi R1 running iStoreOS.
 
 Signed-off-by: istore-ai <istoreai@istoreos.com>
 ---
- drivers/gpu/drm/panfrost/panfrost_devfreq.c | 21 +++++++++++++++++----
- 1 file changed, 17 insertions(+), 4 deletions(-)
+ drivers/gpu/drm/panfrost/panfrost_devfreq.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/gpu/drm/panfrost/panfrost_devfreq.c b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-index 57ae3895ef82..217689895cb1 100644
+index 57ae3895ef82..e62edd6 100644
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -134,17 +134,27 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+@@ -133,7 +133,12 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
  
  	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
  	if (ret) {
 -		/* Continue if the optional regulator is missing */
++		/* -EBUSY: OPP already configured by platform code */
 +		if (ret == -EBUSY) {
-+			dev_info(dev, "OPP already configured, skip set_regulators\n");
-+			goto opp_add_table;
++			dev_info(dev, "OPP regulators already configured, continuing\n");
++			goto skip_set_regulators;
 +		}
 +		/* -ENODEV: optional regulator missing, continue */
  		if (ret != -ENODEV) {
  			if (ret != -EPROBE_DEFER)
  				DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
- 			return ret;
+@@ -141,12 +146,17 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
  		}
  	}
  
-+opp_add_table:
++skip_set_regulators:
  	ret = devm_pm_opp_of_add_table(dev);
  	if (ret) {
--		/* Optional, continue without devfreq */
+ 		/* Optional, continue without devfreq */
 -		if (ret == -ENODEV)
+-			ret = 0;
+-		return ret;
 +		if (ret == -EEXIST)
 +			dev_info(dev, "OPP table already populated, continuing\n");
 +		else if (ret == -ENODEV || ret == -ENOENT)
 +			/* No OPP table / no supported OPPs, continue w/o devfreq */
-+			ret = 0;
++			return 0;
 +		else
- 			ret = 0;
- 		return ret;
++			return ret;
  	}
+ 	pfdevfreq->opp_of_table_added = true;
+ 
 -- 
 2.34.1
