@@ -40,19 +40,23 @@ jobs:
       - name: '🔧 Install 30+ RE tools'
         run: |
           sudo apt-get update -qq
+          # Core tools - use || true so one failure doesn't kill the whole step
           sudo apt-get install -y -qq \
             binutils binutils-aarch64-linux-gnu \
             file xxd \
-            python3-pip python3-dev \
-            radare2 \
-            yara \
-            e2tools \
-            sleuthkit \
-            hashcat 2>/dev/null || true
+            python3-pip python3-dev 2>&1 | tail -5
+          # YARA might not be in all repos
+          sudo apt-get install -y -qq yara 2>/dev/null || echo "(yara not available)"
           # Python packages
-          pip3 install -q pyelftools capstone pycryptodome lief yara-python 2>/dev/null || true
-          echo "=== Tools installed ==="
-          which r2 rz readelf objdump strings xxd 2>/dev/null
+          pip3 install -q pyelftools capstone lief 2>/dev/null || true
+          echo "=== Installed tools ==="
+          for tool in readelf objdump strings xxd nm file python3; do
+              which "$tool" 2>/dev/null && echo "  ✅ $tool" || echo "  ❌ $tool MISSING"
+          done
+          echo "=== Python packages ==="
+          python3 -c "import capstone; print('✅ capstone')" 2>/dev/null || echo "❌ capstone"
+          python3 -c "import elftools; print('✅ pyelftools')" 2>/dev/null || echo "❌ pyelftools"
+          python3 -c "import lief; print('✅ lief')" 2>/dev/null || echo "❌ lief"
 
       - name: '📁 Find all Mali .so files'
         id: find-mali
@@ -178,28 +182,35 @@ jobs:
       # ============================================
       # Stage 2: radare2 analysis
       # ============================================
-      - name: '🔬 [9/30] radare2 Binary Info + Function Detection'
+      - name: '🔬 [9/30] Try radare2 Binary Info (install on-demand)'
         if: steps.find-mali.outputs.found != '0'
         run: |
+          pip3 install -q r2pipe 2>/dev/null || true
+          sudo apt-get install -y -qq radare2 2>/dev/null || snap install radare2 2>/dev/null || true
           while IFS= read -r f; do
             echo "===== $f ====="
             if command -v r2 >/dev/null; then
               r2 -q -c 'i; iS; iI; afl~0; exit' "$f" 2>/dev/null
             else
-              echo "(radare2 not installed)"
+              echo "(radare2 not available - skipping)"
+              echo "Fallback: using objdump -h for section sizes"
+              objdump -h "$f" 2>/dev/null | head -20
             fi
           done < mali_files.txt
 
-      - name: '🔬 [10/30] radare2 Function Count + Complexity'
+      - name: '🔬 [10/30] Function Detection via objdump'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
-            if command -v r2 >/dev/null; then
-              r2 -q -c 'afl; exit' "$f" 2>/dev/null | head -30
-              echo "..."
-              r2 -q -c 'afl~?; exit' "$f" 2>/dev/null
-            fi
+            echo ">>> Exported (T) functions"
+            objdump -T "$f" 2>/dev/null | grep -E "\.text" | head -30
+            echo ""
+            echo ">>> Function count from dynamic symbols"
+            objdump -T "$f" 2>/dev/null | grep -c "F " || echo "(could not count)"
+            echo ""
+            echo ">>> Top function sizes (from .dynsym)"
+            nm -D --size-sort "$f" 2>/dev/null | tail -10
           done < mali_files.txt
 
       # ============================================
