@@ -5,6 +5,7 @@ Custom **redroid** (Android in Docker) image with **Mali-G52 GPU hardware accele
 [![Analyze Mali Binaries](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/analyze-mali-binaries.yml/badge.svg)](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/analyze-mali-binaries.yml)
 [![Build & Test Matrix](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/build-test-matrix.yml/badge.svg)](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/build-test-matrix.yml)
 [![Build Mali-G52 Overlay](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/build-mali-overlay.yml/badge.svg)](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/build-mali-overlay.yml)
+[![Build Panfrost Module](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/build-panfrost-module.yml/badge.svg)](https://github.com/1yeshen/redroid-mali-g52/actions/workflows/build-panfrost-module.yml)
 
 ## Status
 
@@ -14,9 +15,48 @@ Custom **redroid** (Android in Docker) image with **Mali-G52 GPU hardware accele
 | Mali /dev/mali0 detection | ✅ | `--mount bind` preserves inode (fixes Issue #228) |
 | Mali userspace driver load | ⚠️ | g25p0 passes init (rk_so_ver patched 10→8), GPU not functional |
 | SurfaceFlinger GPU init | ❌ | DDK mismatch: kernel g18p0 vs available userspace drivers |
-| Hardware acceleration | ❌ | Pending matching (g13p0–g18p0) bionic userspace driver |
+| **Panfrost kernel module** | **✅ Built** | Cross-compiled for 6.6.127, vermagic matches |
+| **Panfrost module load** | **⚠️ Probe fails** | OPP regulator conflict with Mali driver state |
+| **Hardware acceleration (Mali)** | ❌ | Pending matching (g13p0–g18p0) bionic userspace driver |
+| **Hardware acceleration (Panfrost)** | **🔄 In progress** | Need reboot to clear Mali OPP state, then Mesa for Android |
 
 **Root cause:** The kernel's Mali Bifrost module (`bifrost_kbase.ko`) is compiled at DDK **g18p0-01eac0** (≈r46p0), but all available Android (bionic) userspace Mali drivers are at incompatible DDK versions. Userspace must use a compatible DDK version matching the kernel module's IOCTL interface.
+
+**Current approach:** Due to the Mali DDK mismatch being unsolvable with public bionic drivers, we have **pivoted to Panfrost** (open-source GPU driver). The Panfrost kernel module (`panfrost.ko`) has been successfully cross-compiled for kernel 6.6.127. Loading currently fails due to OPP/regulator state left by the Mali driver — a reboot with Mali blacklisted will clear this.
+
+## Panfrost (Open-Source GPU Driver) — New Approach
+
+After exhausting the closed-source Mali userspace driver approach (see [DDK Compatibility Matrix](#ddk-compatibility-matrix)), we have **pivoted to the open-source Panfrost GPU driver** for Mali-G52 on RK3568.
+
+### Why Panfrost?
+
+- **Panfrost supports Mali-G52** (Bifrost architecture) in mainline Linux since kernel 5.2
+- **Redroid already supports Panfrost** — auto-detects via `/sys/kernel/debug/dri/*/name` and sets `ro.hardware.vulkan=panfrost`, uses `gbm` gralloc
+- **No DDK dependency** — Panfrost is part of the upstream kernel, no proprietary IOCTL interface to match
+- **Open-source** — Mesa Gallium driver + kernel module, fully transparent
+
+### Progress So Far
+
+| Step | Status | Details |
+|------|--------|---------|
+| 1. Research Panfrost feasibility | ✅ | Confirmed: redroid supports Panfrost, RK3568 GPU DT compatible |
+| 2. Analyze iStoreOS kernel config | ✅ | DRM disabled, IOMMU/SMMU/DMA_SHARED_BUFFER enabled |
+| 3. Cross-compile panfrost.ko | ✅ | Built for kernel **6.6.127** (exact match), vermagic = `6.6.127 SMP mod_unload aarch64` |
+| 4. Load DRM modules | ✅ | **5 modules built**: `drm.ko`, `drm_shmem_helper.ko`, `gpu-sched.ko`, `panfrost.ko`, `drm_panel_orientation_quirks.ko` |
+| 5. First probe attempt | ⚠️ | Probe fails with `-EBUSY` — OPP/regulator state leftover from Mali `bifrost_kbase.ko` |
+| 6. Reboot with Mali blacklisted | 🔜 | Next step: blacklist `bifrost_kbase`, reboot, load Panfrost fresh |
+| 7. Build Mesa for Android (bionic) | 🔜 | Cross-compile Mesa with `-Dgallium-drivers=panfrost` for Android container |
+
+### How the Panfrost Kernel Module Was Built
+
+The workflow `.github/workflows/build-panfrost-module.yml` cross-compiles `panfrost.ko` for iStoreOS 24.10.6 (kernel 6.6.127):
+
+1. **Download** vanilla Linux 6.6.127 from kernel.org
+2. **Fetch** OpenWrt kernel config from the iStoreOS repo (generic + rockchip/armv8)
+3. **Merge configs** and enable `CONFIG_DRM=m`, `CONFIG_DRM_PANFROST=m`
+4. **Build vmlinux** (generates `Module.symvers` for core kernel symbols)
+5. **Build modules** via `make modules` (handles composite modules like `drm.ko`)
+6. **Package & upload** all DRM `.ko` files as artifact
 
 ### Critical Discovery: `--mount` vs `--device` for `/dev/mali0`
 
@@ -62,7 +102,7 @@ On iStoreOS (OpenWrt 24.10, kernel 6.6.127) running on EasePi R1 (RK3568):
 │  ┌─────────────────┐    ┌──────────────────────────────┐ │
 │  │ Analyze Mali     │    │ Build & Test Matrix          │ │
 │  │ Binaries (30     │    │ 3 Mali × 4 Base = 12 combos │ │
-│  │ stage RE pipe)   │    │                              │ │
+│  │ stage RE pipe)   │    │ (Mali DDK investigation)     │ │
 │  └─────────────────┘    └──────────────────────────────┘ │
 │  ┌─────────────────┐    ┌──────────────────────────────┐ │
 │  │ Extract Mali .so │ -> │ Build Docker overlay image   │ │
@@ -71,6 +111,14 @@ On iStoreOS (OpenWrt 24.10, kernel 6.6.127) running on EasePi R1 (RK3568):
 │  └─────────────────┘    │  ghcr.io/1yeshen/redroid-     │ │
 │                          │  mali-g52:latest              │ │
 │                          └──────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │ Build Panfrost Module (NEW)                       │    │
+│  │ Cross-compile panfrost.ko for kernel 6.6.127      │    │
+│  │ Download linux-6.6.127 + OpenWrt config           │    │
+│  │ Enable CONFIG_DRM + CONFIG_DRM_PANFROST           │    │
+│  │ Build vmlinux → Module.symvers → make modules     │    │
+│  │ ↓ outputs: panfrost.ko, drm.ko, drm_shmem_helper  │    │
+│  └──────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
          ↓ pull on device
 ┌─────────────────────────────────────────────────────────┐
@@ -79,10 +127,17 @@ On iStoreOS (OpenWrt 24.10, kernel 6.6.127) running on EasePi R1 (RK3568):
 │  │  Docker Container: redroid-mali-g52               │   │
 │  │  ┌────────────────────────────────────────────┐   │   │
 │  │  │  Android 14 (AOSP)                        │   │   │
-│  │  │  ├─ libGLES_mali.so (Mali-G52) ───────────┼──┼───┼───► /dev/mali0
-│  │  │  ├─ gralloc-bifrost.so ───────────────────┼──┼───┼───► /dev/rga
-│  │  │  ├─ hwcomposer.rockchip.so ──────────────┼──┼───┼───► /dev/dri/card0
+│  │  │  ├─ Mesa (Panfrost) ──────────────────────┼──┼───┼───► /dev/dri/renderD128
+│  │  │  ├─ gralloc.gbm ──────────────────────────┼──┼───┼───► /dev/dri/card0
 │  │  │  └─ mpp_service ──────────────────────────┼──┼───┼───► /dev/mpp_service
+│  │  └────────────────────────────────────────────┘   │   │
+│  │                                                    │   │
+│  │  Kernel Modules (new):                             │   │
+│  │  ┌────────────────────────────────────────────┐   │   │
+│  │  │  panfrost.ko (→ /dev/dri/renderD128)       │   │   │
+│  │  │  drm.ko                                     │   │   │
+│  │  │  drm_shmem_helper.ko                        │   │   │
+│  │  │  gpu-sched.ko                               │   │   │
 │  │  └────────────────────────────────────────────┘   │   │
 │  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
@@ -99,6 +154,7 @@ On iStoreOS (OpenWrt 24.10, kernel 6.6.127) running on EasePi R1 (RK3568):
 | `build-mali-overlay.yml` | Extract Mali .so from firmware URL + build Docker overlay image | Free |
 | `extract-mali-from-firmware.yml` | Extract vendor partition from RK3568 Android firmware image | Free |
 | `build-aosp-full.yml` | Full AOSP + redroid-rockchip source build (16-core runner) | Paid |
+| `build-panfrost-module.yml` | **Cross-compile panfrost.ko** for iStoreOS kernel 6.6.127 (DRM + Panfrost from source) | Free |
 
 ### Mali Driver Variants
 
@@ -156,7 +212,9 @@ Full source compilation of AOSP + redroid-rockchip with Mali-G52 HAL.
 
 ## Local Usage (on EasePi R1 / RK3568)
 
-### Prerequisites: Load Mali kernel module
+### Prerequisites
+
+#### Option A: Mali (closed-source, DDK mismatched)
 
 ```bash
 # Load the Bifrost kernel module (required after every reboot on iStoreOS)
@@ -164,6 +222,29 @@ insmod /lib/modules/$(uname -r)/bifrost_kbase.ko
 
 # Verify Mali device
 ls -la /dev/mali0
+```
+
+#### Option B: Panfrost (open-source, recommended for new development)
+
+```bash
+# 1. Blacklist Mali module (prevent auto-load)
+echo "blacklist bifrost_kbase" > /etc/modprobe.d/blacklist-mali.conf
+mv /etc/modules.d/85-rkgpu-bifrost /etc/modules.d/85-rkgpu-bifrost.disabled
+
+# 2. Reboot (clears Mali OPP/regulator state)
+reboot
+
+# 3. After reboot, verify Mali is NOT loaded
+lsmod | grep bifrost  # should be empty
+
+# 4. Load DRM modules (order matters!)
+insmod /mnt/nvme0n1-1/drm-modules/drm.ko
+insmod /mnt/nvme0n1-1/drm-modules/gpu-sched.ko
+insmod /mnt/nvme0n1-1/drm-modules/drm_shmem_helper.ko
+insmod /mnt/nvme0n1-1/drm-modules/panfrost.ko
+
+# 5. Verify Panfrost device
+ls -la /dev/dri/renderD128
 ```
 
 ### Build locally
@@ -174,10 +255,11 @@ docker build --build-arg REDROID_BASE=redroid/redroid:14.0.0-arch-fix \
   -t redroid-mali-g52 -f docker/Dockerfile .
 ```
 
-### Run (with --mount bind fix)
+### Run
+
+#### With Mali GPU acceleration (--mount bind fix)
 
 ```bash
-# Run with Mali GPU acceleration
 # IMPORTANT: Use --mount bind (NOT --device) for /dev/mali0
 docker run -d --privileged \
   --name redroid-mali \
@@ -188,6 +270,17 @@ docker run -d --privileged \
 ```
 
 **Note:** All current Mali userspace drivers (g2p0/g7p1/g25p0) have DDK mismatch with the kernel module (g18p0). See [Status](#status) for details.
+
+#### With Panfrost GPU acceleration (planned)
+
+```bash
+# When Mesa Panfrost is ready, use host GPU mode (auto-detects Panfrost)
+docker run -d --privileged \
+  --name redroid-panfrost \
+  -p 5556:5555 \
+  your-panfrost-image:latest \
+  androidboot.redroid_gpu_mode=host
+```
 
 ### GPU Verification
 
@@ -214,7 +307,8 @@ redroid-mali-g52/
 │   ├── build-mali-overlay.yml      # Firmware extraction + overlay build
 │   ├── build-test-matrix.yml       # 12-combo build & test matrix
 │   ├── build-aosp-full.yml         # Full AOSP build (paid runner)
-│   └── extract-mali-from-firmware.yml  # Firmware partition extraction
+│   ├── extract-mali-from-firmware.yml  # Firmware partition extraction
+│   └── build-panfrost-module.yml       # Cross-compile panfrost.ko for kernel 6.6.127
 ├── scripts/
 │   ├── analyze_mali_so.sh          # Local Mali .so analysis
 │   └── extract-mali-from-firmware.sh   # Firmware extraction script
@@ -316,9 +410,11 @@ This fixes the SIGHUP (exit 129) during init, allowing the container to boot. Ho
 
 ### Known Limitations
 
-1. **DDK mismatch**: Kernel module (g18p0) vs userspace drivers (g2p0/g7p1/g25p0) — IOCTL interface incompatibility
-2. **Binder ABI**: Kernel 6.6 binder ABI is incompatible with Android 14's libbinder (oneway spam handling changed). This causes `servicemanager` and `hwservicemanager` to be zombie. Mali GPU HAL should still load correctly since it communicates via the Mali kernel driver (`/dev/mali0`), not binder.
+1. **DDK mismatch (Mali approach)**: Kernel module (g18p0) vs userspace drivers (g2p0/g7p1/g25p0) — IOCTL interface incompatibility
+2. **Binder ABI**: Kernel 6.6 binder ABI is incompatible with Android 14's libbinder (oneway spam handling changed). This causes `servicemanager` and `hwservicemanager` to be zombie. GPU HAL should still load correctly since it communicates via kernel driver, not binder.
 3. **Missing bionic g13p0 driver**: The correct userspace driver (g13p0 bionic) has not been found in public repositories. It must be extracted from Rockchip's internal Android SDK.
+4. **Panfrost OPP conflict**: Panfrost probe fails with `-EBUSY` when Mali driver was previously loaded. Requires reboot with Mali blacklisted to clear OPP/regulator state.
+5. **Panfrost Mesa build**: Building Mesa for Android (bionic) with Panfrost Gallium driver is still in progress. The pre-built Mesa from `wode2016501/mesa-for-android-container` is for glibc containers and cannot be used directly in redroid.
 
 ## References
 
@@ -336,3 +432,8 @@ This fixes the SIGHUP (exit 129) during init, allowing the container to boot. Ho
 - [Rockchip Linux Graphics](https://opensource.rock-chips.com/wiki_Graphics)
 - [Rockchip Mali Wiki](https://opensource.rock-chips.com/wiki_Mali)
 - [CNflysky/redroid-rk3588](https://github.com/CNflysky/redroid-rk3588) — Reference RK3588 redroid with Mali-G610
+- [Panfrost — Mesa Docs](https://docs.mesa3d.org/drivers/panfrost.html) — Open-source Mali Bifrost driver
+- [Panfrost in mainline Linux](https://gitlab.freedesktop.org/panfrost/linux) — Upstream Panfrost kernel driver
+- [wode2016501/mesa-for-android-container](https://github.com/wode2016501/mesa-for-android-container) — Pre-built Mesa for Android containers (Panfrost/Freedreno)
+- [lfdevs/mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) — Upstream Mesa fork with Android container patches
+- [iStoreOS kernel source](https://github.com/istoreos/istoreos) (branch `istoreos-24.10`) — Kernel source for building Panfrost module
