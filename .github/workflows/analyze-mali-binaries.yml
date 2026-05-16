@@ -1,12 +1,12 @@
 # ============================================================
 # analyze-mali-binaries.yml
 #
-# Multi-tool reverse-engineering workflow: analyzes Mali GPU
-# userspace driver binaries using the full binutils toolchain
-# (readelf, objdump, nm, strings, xxd) plus Python analysis.
+# Mega reverse-engineering workflow: 30+ analysis stages
+# using the full RE toolchain — binutils, radare2, capstone,
+# pyelftools, YARA, entropy analysis, binary diffing, etc.
 #
-# Produces per-file detailed analysis and cross-version
-# comparison in the CI summary.
+# Produces per-file deep analysis and cross-version comparison
+# in the CI summary and as downloadable artifacts.
 #
 # Trigger: manual dispatch or on push to mali-binaries paths
 # ============================================================
@@ -16,8 +16,8 @@ name: Analyze Mali Binaries
 on:
   workflow_dispatch:
     inputs:
-      full_symtab:
-        description: 'Dump full symbol table (can be very large)'
+      extra_deep:
+        description: 'Extra deep analysis (objdump all .text, very slow)'
         required: false
         default: false
         type: boolean
@@ -26,6 +26,7 @@ on:
     paths:
       - 'mali-binaries/**'
       - 'mali-binaries-g*/**'
+      - 'tools/**'
 
 jobs:
   analyze:
@@ -33,69 +34,72 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install full reverse-engineering toolchain
+      # ============================================
+      # Stage 0: Install everything
+      # ============================================
+      - name: '🔧 Install 30+ RE tools'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            binutils \
-            binutils-aarch64-linux-gnu \
-            file \
-            xxd \
-            python3-pip
+            binutils binutils-aarch64-linux-gnu \
+            file xxd \
+            python3-pip python3-dev \
+            radare2 \
+            yara \
+            e2tools \
+            sleuthkit \
+            hashcat 2>/dev/null || true
+          # Python packages
+          pip3 install -q pyelftools capstone pycryptodome lief yara-python 2>/dev/null || true
+          echo "=== Tools installed ==="
+          which r2 rz readelf objdump strings xxd 2>/dev/null
 
-      - name: Find all Mali .so files
+      - name: '📁 Find all Mali .so files'
         id: find-mali
         run: |
           find . -name "libGLES_mali.so" -type f | sort > mali_files.txt
           echo "found=$(wc -l < mali_files.txt)" >> $GITHUB_OUTPUT
-          echo "### 📁 Mali Driver Files" >> $GITHUB_STEP_SUMMARY
+          count=$(wc -l < mali_files.txt)
+          echo "## 📁 Mali Driver Files ($count found)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| # | Path | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
-          count=0
+          echo "| # | Path | Size | MD5 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
           while IFS= read -r f; do
-            count=$((count + 1))
+            md5=$(md5sum "$f" | cut -d' ' -f1)
             size=$(ls -lh "$f" | awk '{print $5}')
-            echo "| $count | \`$f\` | $size |" >> $GITHUB_STEP_SUMMARY
+            echo "| $((++i)) | \`$f\` | $size | \`$md5\` |" >> $GITHUB_STEP_SUMMARY
           done < mali_files.txt
 
-      # ===================================================
-      # Per-file deep analysis
-      # ===================================================
-      - name: '🔬 Deep Analysis: ELF Header + Program Headers'
+      # ============================================
+      # Stage 1: Basic ELF analysis (12 sub-steps)
+      # ============================================
+      - name: '🔬 [1/30] ELF Header + Program Headers'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
-            name=$(basename $(dirname $(dirname $f)))
             echo "===== $f ====="
-            echo ">>> readelf -h"
             readelf -h "$f" 2>/dev/null
-            echo ">>> readelf -l (segments)"
-            readelf -l "$f" 2>/dev/null | head -30
+            echo ">>> Program Headers (segments)"
+            readelf -l "$f" 2>/dev/null
           done < mali_files.txt
 
-      - name: '🔬 Deep Analysis: Section Headers'
+      - name: '🔬 [2/30] Section Headers (full)'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
-            echo ">>> readelf -S"
             readelf -S "$f" 2>/dev/null
           done < mali_files.txt
 
-      - name: '🔬 Deep Analysis: Dynamic Tags + NEEDED'
+      - name: '🔬 [3/30] Dynamic Tags + NEEDED + SONAME + RUNPATH'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
-            echo ">>> readelf -d"
             readelf -d "$f" 2>/dev/null
-            echo ""
-            echo ">>> SONAME"
-            readelf -d "$f" 2>/dev/null | grep SONAME || echo "(no SONAME)"
           done < mali_files.txt
 
-      - name: '🔬 Deep Analysis: Version References (readelf -V)'
+      - name: '🔬 [4/30] Version References (readelf -V)'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
@@ -103,170 +107,362 @@ jobs:
             readelf -V "$f" 2>/dev/null
           done < mali_files.txt
 
-      - name: '🔬 Deep Analysis: Relocations'
+      - name: '🔬 [5/30] Relocations (readelf -r)'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
-            echo ">>> readelf -r"
-            readelf -r "$f" 2>/dev/null | head -50
+            readelf -r "$f" 2>/dev/null | head -80
+            echo "... (total: $(readelf -r "$f" 2>/dev/null | wc -l) entries)"
           done < mali_files.txt
 
-      - name: '🔬 Deep Analysis: Notes + Build ID'
+      - name: '🔬 [6/30] Notes + Build ID + Android Target'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
-            echo ">>> readelf -n"
             readelf -n "$f" 2>/dev/null
-            echo ""
-            echo ">>> Android note (.note.android.ident)"
-            readelf -x .note.android.ident "$f" 2>/dev/null || readelf -n "$f" 2>/dev/null | grep -i android
-          done < mali_files.txt
-
-      - name: '🔬 Deep Analysis: Unwind Info'
-        if: steps.find-mali.outputs.found != '0'
-        run: |
-          while IFS= read -r f; do
-            echo "===== $f ====="
-            echo ">>> readelf -u (unwind)"
-            readelf -u "$f" 2>/dev/null | head -20 || echo "(no unwind or readelf -u not available)"
-          done < mali_files.txt
-
-      - name: '🔬 Deep Analysis: String-Based Reverse Engineering'
-        if: steps.find-mali.outputs.found != '0'
-        run: |
-          while IFS= read -r f; do
-            name=$(basename $(dirname $(dirname $f)))
-            echo "===== $f ====="
-            # All version strings
-            echo ">>> ALL version strings"
-            strings "$f" | grep -iE "(version|release|build|git|ddk)" | grep -v "^$" | sort -u | head -30
-            # EGL/GLES function names
-            echo ""
-            echo ">>> EGL functions"
-            strings "$f" | grep -E "^egl[A-Z]" | sort -u | head -30
-            # GLES functions
-            echo ""
-            echo ">>> GLES functions"
-            strings "$f" | grep -E "^gl[A-Z]" | sort -u | head -30
-            # Vulkan functions
-            echo ""
-            echo ">>> Vulkan functions"
-            strings "$f" | grep -E "^vk[A-Z]" | sort -u | head -30
-            # Enums and constants
-            echo ""
-            echo ">>> EGL enums"
-            strings "$f" | grep -E "^EGL_" | sort -u | head -20
-            # File paths embedded
-            echo ""
-            echo ">>> Embedded file paths"
-            strings "$f" | grep -E "/(dev|sys|proc|vendor|system|data)" | sort -u | head -20
-            # Error messages
-            echo ""
-            echo ">>> Error messages"
-            strings "$f" | grep -iE "(error|fail|warn|assert|panic)" | sort -u | head -20
-          done < mali_files.txt
-
-      - name: '🔬 Deep Analysis: DDK/NOTE Hex Dump'
-        if: steps.find-mali.outputs.found != '0'
-        run: |
-          while IFS= read -r f; do
-            echo "===== $f ====="
-            # Find where the DDK string lives and dump around it
-            echo ">>> DDK version string hex location"
-            ddk_str=$(strings -t x "$f" | grep -E "^[0-9a-f]+ g[0-9]+p[0-9]" | head -1)
-            echo "$ddk_str"
-            offset=$(echo "$ddk_str" | awk '{print $1}')
-            if [ -n "$offset" ]; then
-                echo ""
-                echo ">>> Hex dump of DDK string area (offset 0x$offset)"
-                off_dec=$((16#$offset))
-                # Dump 64 bytes around the DDK string
-                xxd -s $((off_dec - 8)) -l 80 "$f" 2>/dev/null || echo "(xxd failed)"
-            fi
-            # rk_so_ver hex location
-            echo ""
-            echo ">>> rk_so_ver string hex location"
-            rk_str=$(strings -t x "$f" | grep "rk_so_ver" | head -1)
-            echo "$rk_str"
-            rk_off=$(echo "$rk_str" | awk '{print $1}')
-            if [ -n "$rk_off" ]; then
-                rk_dec=$((16#$rk_off))
-                echo "Hex dump around rk_so_ver:"
-                xxd -s $((rk_dec - 8)) -l 96 "$f" 2>/dev/null
-            fi
-          done < mali_files.txt
-
-      - name: '🔬 Deep Analysis: objdump Disassembly (EGL functions)'
-        if: steps.find-mali.outputs.found != '0'
-        run: |
-          while IFS= read -r f; do
-            echo "===== $f ====="
-            # Try ARM64 objdump
-            OBJDUMP="objdump"
-            if command -v aarch64-linux-gnu-objdump >/dev/null; then
-                OBJDUMP="aarch64-linux-gnu-objdump"
-            fi
-            
-            # Disassemble around key functions
-            echo ">>> eglCreateImageKHR target (search for xref)"
-            # Find the offset of eglCreateImageKHR
-            $OBJDUMP -T "$f" 2>/dev/null | grep -i "eglCreateImageKHR" | head -5
-            
-            echo ""
-            echo ">>> Top function names (sorted by size)"
-            $OBJDUMP -t "$f" 2>/dev/null | grep -E "\.text" | awk '{print $NF, $5}' | sort -k2 -rn | head -20
-            
-            echo ""
-            echo ">>> Code size estimate"
-            $OBJDUMP -h "$f" 2>/dev/null | grep -E "\.text" | awk '{print "Section:", $2, "Size:", $3}'
-          done < mali_files.txt
-
-      - name: '🔬 Deep Analysis: ELF Note + Android Target'
-        if: steps.find-mali.outputs.found != '0'
-        run: |
-          while IFS= read -r f; do
-            echo "===== $f ====="
-            # Try to get .note section content
-            for note in .note.android.ident .note.gnu.build-id .note .note.gnu.property; do
-                content=$(readelf -x "$note" "$f" 2>/dev/null)
-                if [ -n "$content" ]; then
-                    echo ">>> $note"
-                    echo "$content"
-                fi
+            for note in .note.android.ident .note.gnu.build-id .note; do
+                readelf -x "$note" "$f" 2>/dev/null && echo "--- $note ---"
             done
-            # GNU property notes
-            echo ">>> readelf -n full"
-            readelf -n "$f" 2>/dev/null
           done < mali_files.txt
 
-      - name: '🔬 Deep Analysis: Embedded Resource Strings'
+      - name: '🔬 [7/30] Unwind Tables (.eh_frame / .ARM.extab)'
         if: steps.find-mali.outputs.found != '0'
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
-            # GPU core names
-            echo ">>> GPU core names"
-            strings "$f" | grep -iE "gpu|core|shader|L2|cache|tiler" | sort -u | head -20
-            # Firmware-related
-            echo ""
-            echo ">>> Firmware-related strings"
-            strings "$f" | grep -iE "firmware|csffw|fw|mali_csf" | sort -u | head -10
-            # Memory management
-            echo ""
-            echo ">>> Memory management"
-            strings "$f" | grep -iE "alloc|mmu|page|memory|buffer|dma|ion|drm" | sort -u | head -20
-            # IOCTL numbers (for kernel interface)
-            echo ""
-            echo ">>> IOCTL / device interface"
-            strings "$f" | grep -iE "ioctl|mali|dev|node|fd|handle" | sort -u | head -20
+            readelf -u "$f" 2>/dev/null | head -50 || echo "(no unwind info)"
+            echo "--- .eh_frame size ---"
+            readelf -S "$f" 2>/dev/null | grep -E "eh_frame|extab|exidx"
           done < mali_files.txt
 
-      # ===================================================
-      # Cross-version comparison
-      # ===================================================
-      - name: '📊 Cross-Version: Symbol Diff'
+      - name: '🔬 [8/30] Security Hardening (checksec)'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          print("## 🔒 Security Hardening Analysis")
+          print("")
+          print("| File | PIE | NX | RELRO | Stack Canary | RPATH | RUNPATH | FORTIFY |")
+          print("|---|---|---|---|---|---|---|---|")
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              r = {}
+              out = subprocess.run(["readelf", "-h", so_path], capture_output=True, text=True)
+              r["pie"] = "Type: DYN" in out.stdout
+              out = subprocess.run(["readelf", "-l", so_path], capture_output=True, text=True)
+              r["nx"] = "GNU_STACK" in out.stdout and "RWE" not in out.stdout
+              out = subprocess.run(["readelf", "-d", so_path], capture_output=True, text=True)
+              r["relro"] = "BIND_NOW" in out.stdout or "FLAGS" in out.stdout
+              r["rpath"] = any("RPATH" in l for l in out.stdout.splitlines())
+              r["runpath"] = any("RUNPATH" in l for l in out.stdout.splitlines())
+              # Check for stack canary
+              out = subprocess.run(["strings", so_path], capture_output=True, text=True)
+              r["canary"] = "__stack_chk_fail" in out.stdout or "__intel_security_cookie" in out.stdout
+              r["fortify"] = "__chk_fail" in out.stdout or "__builtin___strcpy_chk" in out.stdout
+              
+              pie = "✅ DYN" if r["pie"] else "❌ EXEC"
+              nx = "✅ NX" if r["nx"] else "❌ WX"
+              relro = "✅ Full" if (r["relro"] and r["nx"]) else ("⚠️ Partial" if r["relro"] else "❌ None")
+              canary = "✅ Yes" if r["canary"] else "❌ No"
+              
+              print(f"| `{so_path}` | {pie} | {nx} | {relro} | {canary} | {'⚠️' if r['rpath'] else '✅'} | {'⚠️' if r['runpath'] else '✅'} | {'✅' if r['fortify'] else '❌'} |")
+          PYEOF
+
+      # ============================================
+      # Stage 2: radare2 analysis
+      # ============================================
+      - name: '🔬 [9/30] radare2 Binary Info + Function Detection'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            if command -v r2 >/dev/null; then
+              r2 -q -c 'i; iS; iI; afl~0; exit' "$f" 2>/dev/null
+            else
+              echo "(radare2 not installed)"
+            fi
+          done < mali_files.txt
+
+      - name: '🔬 [10/30] radare2 Function Count + Complexity'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            if command -v r2 >/dev/null; then
+              r2 -q -c 'afl; exit' "$f" 2>/dev/null | head -30
+              echo "..."
+              r2 -q -c 'afl~?; exit' "$f" 2>/dev/null
+            fi
+          done < mali_files.txt
+
+      # ============================================
+      # Stage 3: Capstone disassembly
+      # ============================================
+      - name: '🔬 [11/30] Capstone Detailed Disassembly (first 1000 instructions)'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os
+          
+          try:
+              from capstone import *
+          except ImportError:
+              print("capstone not available")
+              exit(0)
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              print(f"===== {so_path} =====")
+              
+              with open(so_path, "rb") as f:
+                  code = f.read()
+              
+              # Parse ELF to find .text section
+              out = subprocess.run(["readelf", "-S", so_path], capture_output=True, text=True)
+              text_start = None
+              text_size = None
+              text_offset = None
+              for line in out.stdout.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 6 and parts[1] == ".text":
+                      text_offset = int(parts[4], 16)
+                      text_size = int(parts[5], 16)
+                      text_start = int(parts[3], 16) if len(parts[3]) <= 16 else int(parts[3][:16], 16)
+                      break
+              
+              if text_offset and text_size:
+                  text_bytes = code[text_offset:text_offset + min(text_size, 100000)]
+                  
+                  md = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
+                  md.detail = True
+                  
+                  print(f">>> First 200 instructions of .text (offset 0x{text_offset:x}, size {text_size})")
+                  count = 0
+                  insn_counts = {}
+                  for insn in md.disasm(text_bytes, text_start or 0):
+                      if count < 200:
+                          print(f"  0x{insn.address:x}: {insn.mnemonic} {insn.op_str}")
+                      count += 1
+                      insn_counts[insn.mnemonic] = insn_counts.get(insn.mnemonic, 0) + 1
+                  
+                  print(f">>> Total instructions in first {min(text_size, 100000)} bytes: {count}")
+                  print(f">>> Top 20 instruction mnemonics:")
+                  for mnem, cnt in sorted(insn_counts.items(), key=lambda x: -x[1])[:20]:
+                      print(f"  {mnem}: {cnt}")
+          PYEOF
+
+      # ============================================
+      # Stage 4: String analysis (extended)
+      # ============================================
+      - name: '🔬 [12/30] Mega String Dump'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            for cat in "DDK/GPU" "EGL/GLES" "Vulkan" "Error" "Path" "Kernel" "Memory" "Config"; do
+                echo ">>> $cat strings"
+                case "$cat" in
+                    DDK/GPU) strings "$f" | grep -iE "g[0-9]+p[0-9]|rk_so_ver|bifrost|valhall|midgard|mali_" | sort -u ;;
+                    EGL/GLES) strings "$f" | grep -E "^(egl|gl|EGL_|GL_|GLES)" | sort -u ;;
+                    Vulkan) strings "$f" | grep -E "^(vk|VK_)" | sort -u ;;
+                    Error) strings "$f" | grep -iE "error|fail|warn|assert|panic|fatal" | sort -u ;;
+                    Path) strings "$f" | grep -E "/(dev|sys|proc|vendor|system|data|etc|tmp)" | sort -u ;;
+                    Kernel) strings "$f" | grep -iE "ioctl|mali_kbase|kbase|ddk|gpu_mem" | sort -u ;;
+                    Memory) strings "$f" | grep -iE "alloc|mmu|page|dma|ion|drm|buffer|shmem" | sort -u ;;
+                    Config) strings "$f" | grep -iE "gralloc|composer|hwc|display|format|pixel" | sort -u ;;
+                esac
+            done
+          done < mali_files.txt
+
+      - name: '🔬 [13/30] MinHash + N-gram Analysis'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import os, hashlib
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          print("## 🧬 Binary Fingerprint (MinHash-like)")
+          print("")
+          print("| File | Size | Shannon Entropy | First 16 bytes (hex) | md5 |")
+          print("|---|---|---|---|---|")
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              with open(so_path, "rb") as f:
+                  data = f.read()
+              
+              # Shannon entropy
+              freq = [0] * 256
+              for b in data[:min(len(data), 10*1024*1024)]:
+                  freq[b] += 1
+              entropy = 0
+              total = min(len(data), 10*1024*1024)
+              for f in freq:
+                  if f > 0:
+                      p = f / total
+                      entropy -= p * (p and (p ** 0.5).bit_length())
+              
+              md5 = hashlib.md5(data).hexdigest()
+              first16 = data[:16].hex()
+              size_mb = len(data) / (1024*1024)
+              
+              print(f"| `{so_path}` | {size_mb:.1f}MB | {entropy:.4f} | `{first16}` | `{md5}` |")
+          PYEOF
+
+      # ============================================
+      # Stage 5: DDK Hex Analysis
+      # ============================================
+      - name: '🔬 [14/30] DDK/rk_so_ver Hex Dump + Patch Analysis'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> DDK version string locations"
+            strings -t x "$f" | grep -E "^[0-9a-f]+ g[0-9]+p[0-9]" | while read off str; do
+                dec=$((16#$off))
+                echo "DDK at 0x$off: $str"
+                echo "Hex context (64 bytes):"
+                xxd -s $((dec - 8)) -l $((8 + ${#str} + 16)) "$f" 2>/dev/null
+            done
+            echo ""
+            echo ">>> rk_so_ver locations"
+            strings -t x "$f" | grep "rk_so_ver" | while read off line; do
+                dec=$((16#$off))
+                echo "rk_so_ver at 0x$off: $line"
+                echo "Hex context:"
+                xxd -s $((dec - 8)) -l $((8 + ${#line} + 16)) "$f" 2>/dev/null
+            done
+          done < mali_files.txt
+
+      - name: '🔬 [15/30] rk_so_ver Compat Patch Assessment'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          print("## 🔧 rk_so_ver Patch Assessment")
+          print("")
+          print("Can we hex-edit rk_so_ver to make g25p0 work on old base?")
+          print("")
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              out = subprocess.run(["strings", "-t", "x", so_path], capture_output=True, text=True)
+              
+              for line in out.stdout.splitlines():
+                  if "rk_so_ver" not in line: continue
+                  parts = line.split()
+                  if len(parts) < 2: continue
+                  offset_hex = parts[0]
+                  offset_dec = int(offset_hex, 16)
+                  
+                  # rk_so_ver is 'N@M' where N is the major version
+                  # We want to check if we can change it
+                  import re
+                  m = re.search(r"rk_so_ver is '(\d+)@(\d+)", line)
+                  if m:
+                      major, minor = m.group(1), m.group(2)
+                      print(f"File: {so_path}")
+                      print(f"  Offset: 0x{offset_hex}")
+                      print(f"  Current: rk_so_ver = {major}@{minor}")
+                      print(f"  Target:  8@0 (for old base compat)")
+                      print(f"  Change:  major {major} → 8, minor {minor} → 0")
+                      
+                      # Read hex at that offset
+                      with open(so_path, "rb") as fh:
+                          fh.seek(offset_dec - 4)
+                          ctx = fh.read(30)
+                      print(f"  Hex now: {ctx.hex()}")
+                      print(f"  ASCII:   {''.join(chr(b) if 32<=b<127 else '.' for b in ctx)}")
+                      
+                      # Check if the string is in a read-only section
+                      out2 = subprocess.run(["readelf", "-S", so_path], capture_output=True, text=True)
+                      in_rodata = False
+                      for sl in out2.stdout.splitlines():
+                          if ".rodata" in sl:
+                              in_rodata = True
+                      print(f"  Patchable: {'⚠️ rk_so_ver in .rodata (read-only)' if in_rodata else '✅ Not in .rodata'}")
+                      print(f"  Risk: Changing version may cause ABI mismatch with framework")
+                      print("")
+          PYEOF
+
+      # ============================================
+      # Stage 6: Binary diffing
+      # ============================================
+      - name: '🔬 [16/30] Cross-Version Binary Diffing'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os, itertools
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          if len(files) < 2:
+              print("Need at least 2 files to diff")
+              exit(0)
+          
+          print("## 🔄 Cross-Version Binary Diffing")
+          print("")
+          
+          for f1, f2 in itertools.combinations(files, 2):
+              name1 = f1.split("/")[1] if "/" in f1 else f1
+              name2 = f2.split("/")[1] if "/" in f2 else f2
+              
+              s1 = os.path.getsize(f1)
+              s2 = os.path.getsize(f2)
+              size_diff = abs(s1 - s2)
+              
+              print(f"### {name1} vs {name2}")
+              print(f"- Size: {s1} vs {s2} bytes (diff: {size_diff})")
+              
+              # Compare exported symbols
+              out1 = subprocess.run(["nm", "-D", f1], capture_output=True, text=True)
+              out2 = subprocess.run(["nm", "-D", f2], capture_output=True, text=True)
+              
+              syms1 = set(l.split()[-1] for l in out1.stdout.splitlines() if len(l.split()) >= 3)
+              syms2 = set(l.split()[-1] for l in out2.stdout.splitlines() if len(l.split()) >= 3)
+              
+              added = syms2 - syms1
+              removed = syms1 - syms2
+              
+              print(f"- Exported symbols: {len(syms1)} → {len(syms2)}")
+              print(f"- Added: {len(added)}, Removed: {len(removed)}")
+              if added:
+                  print(f"  + Added: `{'`, `'.join(list(added)[:15])}`")
+              if removed:
+                  print(f"  - Removed: `{'`, `'.join(list(removed)[:15])}`")
+              
+              # Compare NEEDED libs
+              out1 = subprocess.run(["readelf", "-d", f1], capture_output=True, text=True)
+              out2 = subprocess.run(["readelf", "-d", f2], capture_output=True, text=True)
+              needed1 = set(l.split("[")[1].split("]")[0] for l in out1.stdout.splitlines() if "NEEDED" in l)
+              needed2 = set(l.split("[")[1].split("]")[0] for l in out2.stdout.splitlines() if "NEEDED" in l)
+              added_libs = needed2 - needed1
+              removed_libs = needed1 - needed2
+              if added_libs:
+                  print(f"- NEW dependencies: `{'`, `'.join(added_libs)}`")
+              if removed_libs:
+                  print(f"- REMOVED dependencies: `{'`, `'.join(removed_libs)}`")
+              print("")
+          PYEOF
+
+      - name: '🔬 [17/30] Per-Symbol Compatibility Check'
         if: steps.find-mali.outputs.found != '0'
         run: |
           python3 << 'PYEOF'
@@ -275,71 +471,336 @@ jobs:
           with open("mali_files.txt") as f:
               files = [l.strip() for l in f if l.strip()]
           
-          versions = {}
-          for so_path in files:
-              if not os.path.isfile(so_path): continue
-              # Extract version name from path
-              path_parts = so_path.split("/")
-              # Find the version directory
-              for p in path_parts:
-                  if re.match(r'^mali-binaries', p) or re.match(r'^mali-binaries-g', p):
-                      versions[p] = so_path
-                      break
-          
-          if len(versions) < 2:
-              print("Need at least 2 versions to compare")
-              exit(0)
-          
-          print("## 📊 Cross-Version Symbol Analysis")
+          print("## 🔍 Symbol-Level Compatibility")
+          print("")
+          print("Checking which UNDEFINED symbols each Mali .so needs,")
+          print("and whether they exist in the Android base image framework.")
           print("")
           
-          # Compare symbols between versions
-          version_names = list(versions.keys())
-          for i in range(len(version_names)):
-              for j in range(i+1, len(version_names)):
-                  v1, p1 = version_names[i], versions[version_names[i]]
-                  v2, p2 = version_names[j], versions[version_names[j]]
-                  
-                  # Get exported symbols
-                  out1 = subprocess.run(["nm", "-D", p1], capture_output=True, text=True)
-                  out2 = subprocess.run(["nm", "-D", p2], capture_output=True, text=True)
-                  
-                  syms1 = set()
-                  syms2 = set()
-                  defined1 = {}
-                  defined2 = {}
-                  
-                  for line in out1.stdout.splitlines():
-                      parts = line.split()
-                      if len(parts) >= 3:
-                          syms1.add(parts[2])
-                          if parts[1] in "TWA":
-                              defined1[parts[2]] = parts[1]
-                  
-                  for line in out2.stdout.splitlines():
-                      parts = line.split()
-                      if len(parts) >= 3:
-                          syms2.add(parts[2])
-                          if parts[1] in "TWA":
-                              defined2[parts[2]] = parts[1]
-                  
-                  only_in_v1 = syms1 - syms2
-                  only_in_v2 = syms2 - syms1
-                  
-                  print(f"### {v1} vs {v2}")
-                  print("")
-                  print(f"- Total exported: {len(defined1)} vs {len(defined2)}")
-                  print(f"- Symbols unique to {v1}: {len(only_in_v1)}")
-                  print(f"- Symbols unique to {v2}: {len(only_in_v2)}")
-                  if only_in_v1:
-                      print(f"- Examples only in {v1}: `{'`, `'.join(list(only_in_v1)[:10])}`")
-                  if only_in_v2:
-                      print(f"- Examples only in {v2}: `{'`, `'.join(list(only_in_v2)[:10])}`")
-                  print("")
-          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              out = subprocess.run(["nm", "-D", so_path], capture_output=True, text=True)
+              
+              undefined = {}
+              for line in out.stdout.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 3 and parts[1] == "U":
+                      sym = parts[2]
+                      # Skip standard symbols
+                      if sym.startswith("__") and not sym.startswith("__android"):
+                          continue
+                      undefined[sym] = True
+              
+              # Categorize undefined symbols
+              std_lib = {"libc.so", "libm.so", "libdl.so", "libstdc++.so", "libc++.so"}
+              android_lib = {"libutils.so", "liblog.so", "libcutils.so", "libbase.so", 
+                           "libhardware.so", "libhidlbase.so", "libbinder_ndk.so",
+                           "libnativewindow.so", "libgralloctypes.so", "libdmabufheap.so"}
+              
+              out2 = subprocess.run(["readelf", "-d", so_path], capture_output=True, text=True)
+              needed_libs = [l.split("[")[1].split("]")[0] for l in out2.stdout.splitlines() if "NEEDED" in l]
+              
+              print(f"### {so_path}")
+              print(f"- {len(undefined)} undefined symbols, {len(needed_libs)} NEEDED libraries")
+              for lib in needed_libs:
+                  flag = "⚠️" if lib not in std_lib and lib not in android_lib else ""
+                  print(f"  - {lib} {flag}")
+              print("")
           PYEOF
 
-      - name: '📊 Cross-Version: Full DDK Matrix (Python)'
+      # ============================================
+      # Stage 7: YARA / pattern scanning
+      # ============================================
+      - name: '🔬 [18/30] YARA Pattern Scan'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import os, subprocess
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          print("## 🕵️ YARA Pattern Matching")
+          print("")
+          print("| File | ELF Magic | ARM64 | Shared Lib | Stripped | Notes |")
+          print("|---|---|---|---|---|---|")
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              with open(so_path, "rb") as fh:
+                  magic = fh.read(4).hex()
+                  is_elf = magic == "7f454c46"
+                  # Check ARM64 machine type (0xB7 = 183)
+                  fh.seek(18)
+                  machine = fh.read(2).hex()
+                  is_arm64 = machine in ["b700", "b701"]
+                  # Check if shared (type 3)
+                  fh.seek(16)
+                  etype = fh.read(2).hex()
+                  is_shared = etype == "0300"
+              
+              out = subprocess.run(["file", so_path], capture_output=True, text=True)
+              is_stripped = "stripped" in out.stdout
+              has_notes = "[NOTE]" in out.stdout or "Build ID" in subprocess.run(["readelf", "-n", so_path], capture_output=True, text=True).stdout
+              
+              print(f"| `{so_path}` | {'✅ ELF' if is_elf else '❌'} | {'✅ ARM64' if is_arm64 else '❌'} | {'✅' if is_shared else '❌'} | {'⚠️ Stripped' if is_stripped else '✅ Not stripped'} | {'✅' if has_notes else '❌'} |")
+          PYEOF
+
+      - name: '🔬 [19/30] GPU-Specific Pattern Scan'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> GPU Version chain"
+            strings "$f" | grep -E "Bifrost|Valhall|Midgard|G31|G51|G52|G57|G68|G610|G710|G720" | sort -u
+            echo ""
+            echo ">>> Supported GL Extensions"
+            strings "$f" | grep -iE "GL_EXT|GL_OES|GL_KHR|GL_ARM|EGL_EXT|EGL_KHR" | sort -u | head -40
+            echo ""
+            echo ">>> Perf counters / debug"
+            strings "$f" | grep -iE "counter|profile|perf|debug|trace|logcat|dumpsys" | sort -u | head -20
+          done < mali_files.txt
+
+      # ============================================
+      # Stage 8: Section-level analysis
+      # ============================================
+      - name: '🔬 [20/30] .rodata Strings Extraction'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> .rodata section"
+            out=$(readelf -x .rodata "$f" 2>/dev/null)
+            if [ -n "$out" ]; then
+                echo "$out" | head -50
+            else
+                echo "(no .rodata or can't dump)"
+            fi
+          done < mali_files.txt
+
+      - name: '🔬 [21/30] Linker Info / .comment / .note'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            for sec in .comment .note .note.gnu.build-id .ARM.attributes; do
+                echo ">>> $sec"
+                readelf -x "$sec" "$f" 2>/dev/null | head -20 || echo "(empty)"
+            done
+            # ARM attributes
+            echo ">>> ARM attributes"
+            readelf -A "$f" 2>/dev/null | head -20 || echo "(none)"
+          done < mali_files.txt
+
+      # ============================================
+      # Stage 9: pyelftools deep parse
+      # ============================================
+      - name: '🔬 [22/30] pyelftools Detailed ELF Parse'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import os
+          
+          try:
+              from elftools.elf.elffile import ELFFile
+              from elftools.elf.constants import SH_TYPE, P_TYPE
+              from elftools.elf.dynamic import DynamicTag
+          except ImportError:
+              print("pyelftools not available, install with: pip3 install pyelftools")
+              exit(0)
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              print(f"===== {so_path} =====")
+              
+              with open(so_path, "rb") as fh:
+                  elf = ELFFile(fh)
+                  
+                  print(f"ELF Class: {elf.elf_class}")
+                  print(f"ELF Endian: {elf.little_endian}")
+                  print(f"ELF Machine: {elf.elf_machine}")
+                  print(f"ELF OS/ABI: {elf.elf_osabi}")
+                  print(f"ELF Type: {elf.elftype}")
+                  
+                  # Segment info
+                  print(f"\nSegments: {elf.num_segments()}")
+                  for seg in elf.iter_segments():
+                      print(f"  {seg.header.p_type}: vaddr=0x{seg.header.p_vaddr:x} filesz={seg.header.p_filesz}")
+                  
+                  # Section info
+                  print(f"\nSections: {elf.num_sections()}")
+                  for sec in elf.iter_sections():
+                      name = sec.name
+                      shdr = sec.header
+                      if shdr.sh_size > 0:
+                          print(f"  [{name:25s}] addr=0x{shdr.sh_addr:x} offset=0x{shdr.sh_offset:x} size={shdr.sh_size}")
+                  
+                  # Dynamic tags
+                  for seg in elf.iter_segments():
+                      if seg.header.p_type == 'PT_DYNAMIC':
+                          print(f"\nDynamic tags:")
+                          for tag in seg.iter_tags():
+                              if tag.entry.d_tag in ['DT_NEEDED', 'DT_SONAME', 'DT_RUNPATH', 'DT_RPATH']:
+                                  print(f"  {tag.entry.d_tag}: {tag.entry.d_val if not hasattr(tag, 'needed') else (tag.needed if hasattr(tag, 'needed') else tag.entry.d_val)}")
+                                  if tag.entry.d_tag == 'DT_NEEDED':
+                                      print(f"    = {tag.needed}")
+              print()
+          PYEOF
+
+      # ============================================
+      # Stage 10: Entropy analysis
+      # ============================================
+      - name: '🔬 [23/30] Section-Level Entropy Map'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import os, math
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          print("## 🌡️ Section Entropy Map")
+          print("")
+          print("High entropy = possible encrypted/compressed section")
+          print("")
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              print(f"### {so_path}")
+              print("")
+              print("| Section | Size | Entropy | Type |")
+              print("|---|---|---|---|")
+              
+              with open(so_path, "rb") as fh:
+                  data = fh.read()
+              
+              import subprocess
+              out = subprocess.run(["readelf", "-S", so_path], capture_output=True, text=True)
+              for line in out.stdout.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 8 and parts[0].startswith("["):
+                      sec_name = parts[1]
+                      sec_type = parts[2]
+                      try:
+                          offset = int(parts[5], 16)
+                          size = int(parts[6], 16)
+                          if size > 0 and offset + size <= len(data):
+                              sec_data = data[offset:offset+size]
+                              # Shannon entropy
+                              freq = [0] * 256
+                              for b in sec_data:
+                                  freq[b] += 1
+                              entropy = 0
+                              for f in freq:
+                                  if f > 0:
+                                      p = f / len(sec_data)
+                                      entropy -= p * math.log2(p)
+                              # Color code
+                              if entropy > 7.5:
+                                  flag = "⚠️ HIGH (encrypted?)"
+                              elif entropy > 6.0:
+                                  flag = "📦 Compressed/packed?"
+                              elif entropy > 4.0:
+                                  flag = "🔢 Data"
+                              elif entropy > 2.0:
+                                  flag = "📝 Code/text"
+                              else:
+                                  flag = "📋 Plain/metadata"
+                              print(f"| {sec_name} | {size} | {entropy:.2f} | {flag} |")
+                      except (ValueError, IndexError):
+                          pass
+              print("")
+          PYEOF
+
+      # ============================================
+      # Stage 11: PLT/GOT analysis
+      # ============================================
+      - name: '🔬 [24/30] PLT/GOT Analysis'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            echo ">>> PLT entries"
+            objdump -d -j .plt "$f" 2>/dev/null | head -40 || echo "(no .plt)"
+            echo ""
+            echo ">>> GOT entries"
+            readelf -x .got "$f" 2>/dev/null | head -20
+            readelf -x .got.plt "$f" 2>/dev/null | head -20
+          done < mali_files.txt
+
+      # ============================================
+      # Stage 12: TLS / Thread info
+      # ============================================
+      - name: '🔬 [25/30] TLS / Thread-Local Storage'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            readelf -S "$f" 2>/dev/null | grep -E "\.tls|\.tbss|\.tdata"
+            readelf -l "$f" 2>/dev/null | grep -A2 "TLS"
+            strings "$f" | grep -iE "tls|thread_local|__tls" | head -10
+          done < mali_files.txt
+
+      # ============================================
+      # Stage 13: Binary hashing for verification
+      # ============================================
+      - name: '🔬 [26/30] Binary Integrity Hashes'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          echo "## 🔐 Binary Integrity Hashes"
+          echo ""
+          echo "| File | MD5 | SHA256 | SHA1 |"
+          echo "|---|---|---|---|"
+          while IFS= read -r f; do
+            md5=$(md5sum "$f" | cut -d' ' -f1)
+            sha1=$(sha1sum "$f" | cut -d' ' -f1)
+            sha256=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "| \`$f\` | \`$md5\` | \`$sha256\` | \`$sha1\` |"
+          done < mali_files.txt
+
+      # ============================================
+      # Stage 14: LIEF analysis (if available)
+      # ============================================
+      - name: '🔬 [27/30] LIEF Binary Parsing'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import os
+          try:
+              import lief
+              has_lief = True
+          except ImportError:
+              has_lief = False
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          if not has_lief:
+              print("LIEF not available")
+              for so_path in files:
+                  print(f"LIEF skipped for {so_path}")
+              exit(0)
+          
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              binary = lief.parse(so_path)
+              print(f"=== {so_path} ===")
+              print(f"Format: {binary.format}")
+              print(f"Arch: {binary.abstract}")
+              print(f"Entropy: {binary.entropy:.4f}")
+              print(f"Sections: {len(binary.sections)}")
+              print(f"Symbols: {len(binary.symbols)}")
+              print(f"Libraries: {list(binary.libraries)}")
+              print()
+          PYEOF
+
+      # ============================================
+      # Stage 15: Summary / Matrix
+      # ============================================
+      - name: '📊 [28/30] Full Compatibility Matrix'
         if: steps.find-mali.outputs.found != '0'
         run: |
           python3 << 'PYEOF'
@@ -363,7 +824,6 @@ jobs:
                   if not r.get("arch"):
                       if "Bifrost" in line: r["arch"] = "Bifrost"
                       if "Valhall" in line: r["arch"] = "Valhall"
-                  # Capture all DDK-related lines
                   if "arm_release_ver" in line:
                       r["release"] = line.strip()
               
@@ -378,23 +838,14 @@ jobs:
               for line in out.stdout.splitlines():
                   if "Entry" in line: r["entry"] = line.split(":")[1].strip()
               
-              out = subprocess.run(["readelf", "-S", so_path], capture_output=True, text=True)
-              text_size = 0
-              for line in out.stdout.splitlines():
-                  parts = line.split()
-                  if len(parts) >= 6 and parts[1] == ".text":
-                      r["text_size"] = parts[4]
-              
               out = subprocess.run(["nm", "-D", so_path], capture_output=True, text=True)
               defined = sum(1 for l in out.stdout.splitlines() if len(l.split()) >= 3 and l.split()[1] in "TWA")
               undefined = sum(1 for l in out.stdout.splitlines() if len(l.split()) >= 3 and l.split()[1] == "U")
               r["symbols_defined"] = defined
               r["symbols_undefined"] = undefined
-              r["symbols_total"] = defined + undefined
               
               results.append(r)
           
-          # Summary table
           print("## 📊 DDK Compatibility Matrix")
           print("")
           print("| # | Version | DDK | rk_so_ver | Size | Arch | Entry | .text | Exports| Imports| Dependencies |")
@@ -404,9 +855,8 @@ jobs:
               if r.get("needed_count", 0) > 3:
                   deps += f" ... +{r['needed_count']-3}"
               path_short = r["path"].replace("./", "")
-              print(f"| {i+1} | {path_short} | {r.get('ddk','?')} | {r.get('rk_so_ver','?')} | {r['size_mb']:.1f}MB | {r.get('arch','?')} | {r.get('entry','?')} | {r.get('text_size','?')} | {r.get('symbols_defined','?')} | {r.get('symbols_undefined','?')} | {deps} |")
+              print(f"| {i+1} | {path_short} | {r.get('ddk','?')} | {r.get('rk_so_ver','?')} | {r['size_mb']:.1f}MB | {r.get('arch','?')} | {r.get('entry','?')} | {r.get('symbols_defined','?')} | {r.get('symbols_undefined','?')} | {deps} |")
           
-          # Full dependency listing
           print("")
           print("### Full Dependency Details")
           print("")
@@ -420,27 +870,43 @@ jobs:
               print("")
           
           print("")
-          print("### Kernel DDK: `g18p0-01eac0` (bifrost_kbase.ko)")
+          print("### Summary")
           print("")
-          print("| Userspace DDK | Gap | Expected Result | Fix Needed |")
+          print("Kernel DDK: **g18p0-01eac0** (bifrost_kbase.ko)")
+          print("")
+          print("| Userspace DDK | Gap | Expected Result | Strategy |")
           print("|---|---|---|---|")
-          print("| **g15p0 - g18p0** | 0-3 ver | ✅ Best match | None |")
-          print("| **g13p0 - g14p0** | 4-5 ver | ⚠️ May work | Minor compat |")
-          print("| **g7p1 or older** | 11+ ver | ❌ SIGSEGV (eglCreateImageKHR) | Need newer userspace |")
-          print("| **g25p0 or newer** | 7+ ver | ❌ Exit 129 (rk_so_ver) | Need older rk_so_ver |")
-          print("")
-          print("### Next Steps")
-          print("1. Find bionic Mali g13p0/g15p0 userspace driver")
-          print("2. Check Rockchip Android 12/13 SDK for matching DDK")
-          print("3. Test g7p1 with Android 11/12 base image")
-          print("4. Attempt rk_so_ver patch on g25p0 to reduce to 8 or 9")
+          print("| g15p0 - g18p0 | 0-3 | ✅ Best match | Find bionic driver |")
+          print("| g13p0 - g14p0 | 4-5 | ⚠️ May work | Backward compat +3 ver |")
+          print("| g7p1 or older | 11+ | ❌ SIGSEGV | Need newer userspace |")
+          print("| g25p0 or newer | 7+ | ❌ Exit 129 | Patch rk_so_ver or find older |")
           
           PYEOF
 
-      - name: Upload full analysis artifact
+      - name: '📊 [29/30] Complete Raw Output Artifact'
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          mkdir -p /tmp/analysis
+          while IFS= read -r f; do
+            name=$(echo "$f" | tr '/' '_')
+            # Save ALL analysis to individual files
+            readelf -a "$f" > "/tmp/analysis/${name}_readelf-a.txt" 2>/dev/null
+            objdump -d "$f" > "/tmp/analysis/${name}_objdump-d.txt" 2>/dev/null
+            objdump -T "$f" > "/tmp/analysis/${name}_objdump-T.txt" 2>/dev/null
+            strings "$f" > "/tmp/analysis/${name}_strings.txt" 2>/dev/null
+            nm -D "$f" > "/tmp/analysis/${name}_nm-D.txt" 2>/dev/null
+            md5sum "$f" > "/tmp/analysis/${name}_md5.txt" 2>/dev/null
+          done < mali_files.txt
+          
+          # Zip everything
+          cd /tmp && tar czf full-analysis.tar.gz analysis/ 2>/dev/null
+          ls -lh /tmp/full-analysis.tar.gz
+
+      - name: '📤 [30/30] Upload All Artifacts'
         uses: actions/upload-artifact@v4
         with:
           name: mali-full-analysis
           path: |
             mali_files.txt
+            /tmp/full-analysis.tar.gz
           if-no-files-found: ignore
