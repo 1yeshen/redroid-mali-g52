@@ -123,11 +123,12 @@ jobs:
       - name: Build DRM subsystem + panfrost.ko
         run: |
           cd /tmp/linux-${KERNEL_VERSION}
-          # Build entire DRM subsystem. Module.symvers from vmlinux build
-          # provides core kernel exported symbols.
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            M=drivers/gpu/drm \
-            modules
+          # Use top-level `modules` target instead of M= because:
+          # 1. drm.ko is a composite module (built from drm-y objects)
+          #    which M= doesn't handle correctly
+          # 2. vmlinux already compiled, modules build is incremental
+          # 3. OpenWrt kernel config has few modules, build is fast (~2 min)
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) modules
           echo "=== Build result ==="
           echo "--- DRM modules built ---"
           find drivers/gpu/drm/ -name "*.ko" -type f 2>/dev/null | sort
