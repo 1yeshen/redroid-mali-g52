@@ -217,7 +217,9 @@ jobs:
       # Stage 3: Capstone disassembly
       # ============================================
       - name: '🔬 [11/30] Capstone Detailed Disassembly (first 1000 instructions)'
+        continue-on-error: true
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import subprocess, os
@@ -276,7 +278,9 @@ jobs:
       # Stage 4: String analysis (extended)
       # ============================================
       - name: '🔬 [12/30] Mega String Dump'
+        continue-on-error: true
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -296,7 +300,9 @@ jobs:
           done < mali_files.txt
 
       - name: '🔬 [13/30] MinHash + N-gram Analysis'
+        continue-on-error: true
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import os, hashlib
@@ -337,6 +343,7 @@ jobs:
       # ============================================
       - name: '🔬 [14/30] DDK/rk_so_ver Hex Dump + Patch Analysis'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -359,6 +366,7 @@ jobs:
 
       - name: '🔬 [15/30] rk_so_ver Compat Patch Assessment'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import subprocess, os
@@ -417,6 +425,7 @@ jobs:
       # ============================================
       - name: '🔬 [16/30] Cross-Version Binary Diffing'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import subprocess, os, itertools
@@ -475,6 +484,7 @@ jobs:
 
       - name: '🔬 [17/30] Per-Symbol Compatibility Check'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import subprocess, os, re
@@ -524,6 +534,7 @@ jobs:
       # ============================================
       - name: '🔬 [18/30] YARA Pattern Scan'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import os, subprocess
@@ -559,6 +570,7 @@ jobs:
 
       - name: '🔬 [19/30] GPU-Specific Pattern Scan'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -577,6 +589,7 @@ jobs:
       # ============================================
       - name: '🔬 [20/30] .rodata Strings Extraction'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -591,6 +604,7 @@ jobs:
 
       - name: '🔬 [21/30] Linker Info / .comment / .note'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -608,6 +622,7 @@ jobs:
       # ============================================
       - name: '🔬 [22/30] pyelftools Detailed ELF Parse'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import os
@@ -666,6 +681,7 @@ jobs:
       # ============================================
       - name: '🔬 [23/30] Section-Level Entropy Map'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import os, math
@@ -731,6 +747,7 @@ jobs:
       # ============================================
       - name: '🔬 [24/30] PLT/GOT Analysis'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -747,6 +764,7 @@ jobs:
       # ============================================
       - name: '🔬 [25/30] TLS / Thread-Local Storage'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -760,6 +778,7 @@ jobs:
       # ============================================
       - name: '🔬 [26/30] Binary Integrity Hashes'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           echo "## 🔐 Binary Integrity Hashes"
           echo ""
@@ -777,6 +796,7 @@ jobs:
       # ============================================
       - name: '🔬 [27/30] LIEF Binary Parsing'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import os
@@ -813,6 +833,7 @@ jobs:
       # ============================================
       - name: '📊 [28/30] Full Compatibility Matrix'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import subprocess, os, re
@@ -896,6 +917,7 @@ jobs:
 
       - name: '📊 [29/30] Complete Raw Output Artifact'
         if: steps.find-mali.outputs.found != '0'
+        continue-on-error: true
         run: |
           mkdir -p /tmp/analysis
           while IFS= read -r f; do
