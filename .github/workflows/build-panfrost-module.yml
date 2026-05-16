@@ -24,6 +24,7 @@ on:
     paths:
       - '.github/workflows/build-panfrost-module.yml'
       - 'patches/0001-panfrost-devfreq-handle-preconfigured-OPP.patch'
+      - 'patches/opp-fix/opp-fix.c'
 
 env:
   KERNEL_VERSION: 6.6.127
@@ -153,6 +154,21 @@ jobs:
           echo "--- panfrost.ko ---"
           ls -lh drivers/gpu/drm/panfrost/panfrost.ko 2>/dev/null || echo "BUILD FAILED"
 
+      - name: Build opp-fix.ko (GPU OPP fix helper module)
+        run: |
+          cd /tmp/linux-${KERNEL_VERSION}
+          mkdir -p opp-fix
+          cp "${GITHUB_WORKSPACE}/patches/opp-fix/opp-fix.c" opp-fix/
+          cat > opp-fix/Makefile << 'MAKEEOF'
+          obj-m := opp-fix.o
+          MAKEEOF
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) \
+            -C /tmp/linux-${KERNEL_VERSION} \
+            M=/tmp/linux-${KERNEL_VERSION}/opp-fix \
+            modules
+          echo "=== opp-fix.ko ==="
+          ls -lh opp-fix/opp-fix.ko 2>/dev/null || echo "BUILD FAILED"
+
       - name: Verify module vermagic
         run: |
           cd /tmp/linux-${KERNEL_VERSION}
@@ -161,6 +177,10 @@ jobs:
             VERMAGIC=$(aarch64-linux-gnu-objdump -s -j .modinfo "$mod" 2>/dev/null | grep -oa "vermagic=[^[:space:]]*" | head -1)
             echo "$(basename $mod): $VERMAGIC"
           done
+          if [ -f opp-fix/opp-fix.ko ]; then
+            VERMAGIC=$(aarch64-linux-gnu-objdump -s -j .modinfo opp-fix/opp-fix.ko 2>/dev/null | grep -oa "vermagic=[^[:space:]]*" | head -1)
+            echo "opp-fix.ko: $VERMAGIC"
+          fi
 
       - name: Package DRM modules as tarball
         run: |
@@ -169,6 +189,11 @@ jobs:
           find drivers/gpu/drm/ -name "*.ko" -type f | sort | while read f; do
             cp --parents "$f" /tmp/drm-modules/
           done
+          # Include opp-fix.ko
+          if [ -f opp-fix/opp-fix.ko ]; then
+            cp opp-fix/opp-fix.ko /tmp/drm-modules/
+            echo "opp-fix.ko added to package"
+          fi
           cp .config /tmp/drm-modules/
           cd /tmp/drm-modules
           tar czf /tmp/drm-modules-${KERNEL_VERSION}.tar.gz .
@@ -197,6 +222,10 @@ jobs:
             echo "| panfrost.ko | $((SIZE / 1024)) KB |" >> $GITHUB_STEP_SUMMARY
             TOTAL_MODS=$(find /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/ -name "*.ko" -type f | wc -l)
             echo "| Total DRM modules | ${TOTAL_MODS} |" >> $GITHUB_STEP_SUMMARY
+            if [ -f /tmp/linux-${KERNEL_VERSION}/opp-fix/opp-fix.ko ]; then
+              OPP_SIZE=$(stat -c%s /tmp/linux-${KERNEL_VERSION}/opp-fix/opp-fix.ko)
+              echo "| opp-fix.ko | $((OPP_SIZE / 1024)) KB |" >> $GITHUB_STEP_SUMMARY
+            fi
             echo "| Status | ✅ Built successfully |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Status | ❌ Build failed |" >> $GITHUB_STEP_SUMMARY
