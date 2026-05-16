@@ -7,10 +7,12 @@
 # Strategy:
 #   1. Install aarch64 cross-compiler
 #   2. Download vanilla Linux 6.6.127 source
-#   3. Fetch OpenWrt kernel config (generic + rockchip/armv8)
-#   4. Merge configs + enable CONFIG_DRM + CONFIG_DRM_PANFROST
-#   5. Cross-compile only panfrost.ko
-#   6. Upload as artifact
+#   3. Apply patches (OPP pre-config fix for rockchip_opp_select)
+#   4. Fetch OpenWrt kernel config (generic + rockchip/armv8)
+#   5. Merge configs + enable CONFIG_DRM + CONFIG_DRM_PANFROST
+#   6. Build vmlinux (for Module.symvers)
+#   7. Build all DRM modules (drm.ko, gpu-sched.ko, panfrost.ko, etc.)
+#   8. Upload as artifact
 # ============================================================
 
 name: Build Panfrost Kernel Module
@@ -21,6 +23,7 @@ on:
     branches: [main, master]
     paths:
       - '.github/workflows/build-panfrost-module.yml'
+      - 'patches/0001-panfrost-devfreq-handle-preconfigured-OPP.patch'
 
 env:
   KERNEL_VERSION: 6.6.127
@@ -48,6 +51,21 @@ jobs:
           echo "${KERNEL_HASH}  /tmp/linux-${KERNEL_VERSION}.tar.xz" | sha256sum -c
           tar xf /tmp/linux-${KERNEL_VERSION}.tar.xz -C /tmp/
           echo "Kernel source extracted to /tmp/linux-${KERNEL_VERSION}"
+
+      - name: Apply Panfrost driver patches
+        run: |
+          # Apply the OPP pre-configuration fix patch
+          PATCH_FILE="${GITHUB_WORKSPACE}/patches/0001-panfrost-devfreq-handle-preconfigured-OPP.patch"
+          if [ -f "$PATCH_FILE" ]; then
+            cd /tmp/linux-${KERNEL_VERSION}
+            echo "=== Applying patch: $PATCH_FILE ==="
+            patch -p1 < "$PATCH_FILE"
+            echo "=== Patch applied successfully ==="
+            echo "=== Modified file: ==="
+            grep -n "EBUSY\|EEXIST\|skip_set_regulators" drivers/gpu/drm/panfrost/panfrost_devfreq.c
+          else
+            echo "WARNING: Patch file not found at $PATCH_FILE, continuing without patch"
+          fi
 
       - name: Fetch iStoreOS kernel config files
         run: |

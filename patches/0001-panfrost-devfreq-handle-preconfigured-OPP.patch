@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: istore-ai <istoreai@istoreos.com>
+Date: Sat, 16 May 2026 19:30:00 +0800
+Subject: [PATCH] panfrost/devfreq: handle OPP pre-configured by platform code
+
+On Rockchip platforms, rockchip_opp_select pre-populates the GPU OPP
+table before panfrost probes. This causes:
+
+  - devm_pm_opp_set_regulators() -> -EBUSY (regulators already set)
+  - devm_pm_opp_of_add_table()   -> -EEXIST (table already parsed)
+
+Treat both as non-fatal so panfrost can continue with the existing
+OPP configuration. Without this fix, panfrost probe fails with -EBUSY
+on RK3568/EasePi R1 running iStoreOS.
+
+Signed-off-by: istore-ai <istoreai@istoreos.com>
+---
+ drivers/gpu/drm/panfrost/panfrost_devfreq.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/panfrost/panfrost_devfreq.c b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
+index 57ae3895ef82..0c03d2d7db4b 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
++++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
+@@ -134,7 +134,12 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+ 
+ 	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
+ 	if (ret) {
+-		/* Continue if the optional regulator is missing */
++		/* -EBUSY: OPP already configured by platform code */
++		if (ret == -EBUSY) {
++			dev_info(dev, "OPP regulators already configured, continuing\n");
++			goto skip_set_regulators;
++		}
++		/* -ENODEV: optional regulator missing, continue */
+ 		if (ret != -ENODEV) {
+ 			if (ret != -EPROBE_DEFER)
+ 				DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
+@@ -142,12 +147,16 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+ 		}
+ 	}
+ 
++skip_set_regulators:
+ 	ret = devm_pm_opp_of_add_table(dev);
+ 	if (ret) {
+ 		/* Optional, continue without devfreq */
+-		if (ret == -ENODEV)
+-			ret = 0;
+-		return ret;
++		if (ret == -EEXIST)
++			dev_info(dev, "OPP table already populated, continuing\n");
++		else if (ret == -ENODEV)
++			return 0; /* No OPP table, continue without devfreq */
++		else
++			return ret;
+ 	}
+ 	pfdevfreq->opp_of_table_added = true;
+ 
+-- 
+2.34.1
