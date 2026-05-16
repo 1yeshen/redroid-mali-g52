@@ -101,8 +101,12 @@ jobs:
       - name: Build DRM subsystem + panfrost.ko
         run: |
           cd /tmp/linux-${KERNEL_VERSION}
-          # Build the entire DRM subsystem including panfrost and all deps
+          # Build entire DRM subsystem (includes panfrost + all deps)
+          # KBUILD_MODPOST_WARN=1: core kernel exported symbols (krealloc,
+          # ida_alloc_range, etc.) are resolved at module load time against
+          # the running kernel, which has the same .config and version.
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            KBUILD_MODPOST_WARN=1 \
             M=drivers/gpu/drm \
             modules
           echo "=== Build result ==="
