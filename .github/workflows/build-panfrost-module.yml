@@ -108,8 +108,17 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) vmlinux
           echo "=== vmlinux built ==="
           ls -lh vmlinux 2>/dev/null | awk '{print $5, $9}'
-          echo "=== Module.symvers ==="
-          wc -l Module.symvers
+          # Kernel 6.6 generates vmlinux.symvers, not Module.symvers.
+          # External module build (M=) needs Module.symvers.
+          if [ -f vmlinux.symvers ]; then
+            cp vmlinux.symvers Module.symvers
+            echo "=== Module.symvers created from vmlinux.symvers ==="
+            wc -l Module.symvers
+          else
+            echo "ERROR: vmlinux.symvers not found!"
+            ls -la *.symvers 2>/dev/null || echo "No .symvers files"
+            exit 1
+          fi
 
       - name: Build DRM subsystem + panfrost.ko
         run: |
