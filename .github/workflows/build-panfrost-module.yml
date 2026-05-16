@@ -98,15 +98,25 @@ jobs:
           echo "=== Kernel release ==="
           cat include/config/kernel.release
 
+      - name: Build vmlinux (for Module.symvers)
+        run: |
+          cd /tmp/linux-${KERNEL_VERSION}
+          # Build vmlinux to generate Module.symvers with all built-in
+          # exported symbols. This is needed because M= (external module
+          # build) requires Module.symvers to resolve core kernel symbols.
+          echo "Building vmlinux (this takes ~3-5 min)..."
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) vmlinux
+          echo "=== vmlinux built ==="
+          ls -lh vmlinux 2>/dev/null | awk '{print $5, $9}'
+          echo "=== Module.symvers ==="
+          wc -l Module.symvers
+
       - name: Build DRM subsystem + panfrost.ko
         run: |
           cd /tmp/linux-${KERNEL_VERSION}
-          # Build entire DRM subsystem (includes panfrost + all deps)
-          # KBUILD_MODPOST_WARN=1: core kernel exported symbols (krealloc,
-          # ida_alloc_range, etc.) are resolved at module load time against
-          # the running kernel, which has the same .config and version.
+          # Build entire DRM subsystem. Module.symvers from vmlinux build
+          # provides core kernel exported symbols.
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            KBUILD_MODPOST_WARN=1 \
             M=drivers/gpu/drm \
             modules
           echo "=== Build result ==="
