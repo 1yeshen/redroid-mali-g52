@@ -160,11 +160,12 @@ jobs:
       - name: Upload DRM modules artifact
         uses: actions/upload-artifact@v4
         with:
-          name: drm-modules-${KERNEL_VERSION}
-          path: /tmp/drm-modules-${KERNEL_VERSION}.tar.gz
+          name: drm-modules-${{ env.KERNEL_VERSION }}
+          path: /tmp/drm-modules-${{ env.KERNEL_VERSION }}.tar.gz
           if-no-files-found: error
 
       - name: Summary
+        if: always()
         run: |
           echo "## Panfrost Module Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
