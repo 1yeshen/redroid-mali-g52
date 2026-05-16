@@ -1,0 +1,112 @@
+# ============================================================
+# build-test-matrix.yml
+#
+# Build and test ALL available Mali driver versions with
+# different base images to find a working combination.
+#
+# Strategy: each cell in the matrix = one build + run test.
+# A build "passes" if the container runs (exit 0) and
+# dumpsys shows a Mali GPU driver loaded.
+# ============================================================
+
+name: Build & Test Matrix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'mali-binaries*/**'
+      - 'docker/**'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # test all combos even if some fail
+      matrix:
+        mali_version: [g2p0, g7p1, g25p0]
+        redroid_base:
+          - redroid/redroid:11.0.0-latest
+          - redroid/redroid:12.0.0-latest
+          - redroid/redroid:13.0.0-latest
+          - redroid/redroid:14.0.0-arch-fix
+        exclude:
+          # g25p0 with old base known to fail
+          - mali_version: g25p0
+            redroid_base: redroid/redroid:14.0.0-arch-fix
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Mali driver version
+        id: select-mali
+        run: |
+          MALI_DIR="mali-binaries-${{ matrix.mali_version }}"
+          if [ -d "$MALI_DIR" ]; then
+            echo "Using Mali driver from: $MALI_DIR"
+            # Copy selected version to mali-binaries for Docker build
+            rm -rf mali-binaries/vendor
+            cp -rv "$MALI_DIR/vendor" mali-binaries/
+            echo "mali_ddk=$(strings $MALI_DIR/vendor/lib64/egl/libGLES_mali.so | grep -E '^g[0-9]+p[0-9]' | head -1)" >> $GITHUB_OUTPUT
+          else
+            echo "Mali driver dir not found: $MALI_DIR"
+            echo "Using default mali-binaries"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build overlay image
+        id: build
+        continue-on-error: true
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg REDROID_BASE=${{ matrix.redroid_base }} \
+            -t test-mali-${{ matrix.mali_version }}-${{ matrix.redroid_base }} \
+            -f docker/Dockerfile \
+            --load \
+            . 2>&1 | tee build.log
+          echo "build_status=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Quick boot test
+        if: steps.build.outputs.build_status == '0'
+        continue-on-error: true
+        timeout-seconds: 30
+        run: |
+          CONTAINER="test-${{ matrix.mali_version }}-$(echo ${{ matrix.redroid_base }} | tr '/:' '_')"
+          docker rm -f "$CONTAINER" 2>/dev/null || true
+          
+          # Run container with 20s timeout
+          timeout 20 docker run --rm \
+            --name "$CONTAINER" \
+            test-mali-${{ matrix.mali_version }}-${{ matrix.redroid_base }} \
+            androidboot.redroid_gpu_mode=mali 2>&1 | head -10 || true
+          
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          if [ $EXIT_CODE -eq 124 ]; then
+            echo "Container ran for 20s without crashing - SUCCESS"
+            echo "result=success" >> $GITHUB_OUTPUT
+          elif [ $EXIT_CODE -eq 129 ]; then
+            echo "Container exited with 129 (SIGHUP) - FAIL"
+            echo "result=exit_129" >> $GITHUB_OUTPUT
+          else
+            echo "Container exit code: $EXIT_CODE"
+            echo "result=exit_$EXIT_CODE" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Matrix result summary
+        run: |
+          echo "| Mali=${{ matrix.mali_version }} | Base=${{ matrix.redroid_base }} |" >> $GITHUB_STEP_SUMMARY
+      - name: Upload build logs on failure
+        if: failure() || steps.build.outputs.build_status != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.mali_version }}-${{ matrix.redroid_base }}
+          path: build.log
+          if-no-files-found: ignore

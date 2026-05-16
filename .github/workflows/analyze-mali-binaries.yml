@@ -1,0 +1,173 @@
+# ============================================================
+# analyze-mali-binaries.yml
+#
+# Reverse-engineering workflow: analyzes Mali GPU userspace
+# driver binaries committed to the repository. Dumps DDK
+# versions, ELF metadata, symbol tables, and dependency info
+# to help with compatibility assessment.
+#
+# Trigger: manual dispatch or on push to mali-binaries paths
+# ============================================================
+
+name: Analyze Mali Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Verbose output (full symbol dump)'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main, master]
+    paths:
+      - 'mali-binaries/**'
+      - 'mali-binaries-g*/**'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install analysis tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils file xxd
+
+      - name: Find all Mali .so files
+        id: find-mali
+        run: |
+          find . -name "libGLES_mali.so" -type f | sort > mali_files.txt
+          echo "found=$(wc -l < mali_files.txt)" >> $GITHUB_OUTPUT
+          echo "### Mali Driver Files Found" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| # | File | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          count=0
+          while IFS= read -r f; do
+            count=$((count + 1))
+            size=$(ls -lh "$f" | awk '{print $5}')
+            echo "| $count | \`$f\` | $size |" >> $GITHUB_STEP_SUMMARY
+          done < mali_files.txt
+
+      - name: Analyze each Mali .so
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          while IFS= read -r f; do
+            echo ""
+            echo "============================================"
+            echo "  Analyzing: $f"
+            echo "============================================"
+
+            # 1. File info
+            echo "--- [1] File Info ---"
+            file "$f"
+            ls -lh "$f"
+
+            # 2. ELF header
+            echo "--- [2] ELF Header ---"
+            readelf -h "$f" 2>/dev/null | grep -E "(Class|Machine|Entry)"
+
+            # 3. DDK version strings
+            echo "--- [3] DDK Version ---"
+            strings "$f" | grep -E "^g[0-9]+p[0-9]" | head -3
+            strings "$f" | grep "rk_so_ver" | head -3
+
+            # 4. Dynamic dependencies
+            echo "--- [4] NEEDED Libraries ---"
+            readelf -d "$f" 2>/dev/null | grep "NEEDED" | sed 's/.*\[\(.*\)\]/  \1/'
+
+            # 5. GPU architecture
+            echo "--- [5] GPU Architecture ---"
+            strings "$f" | grep -iE "(bifrost|valhall|midgard)" | sort -u | head -5
+
+            # 6. Build ID
+            echo "--- [6] Build ID ---"
+            readelf -n "$f" 2>/dev/null | grep "Build ID" || echo "(none)"
+
+            # 7. Symbol counts
+            echo "--- [7] Symbols ---"
+            total=$(nm -D "$f" 2>/dev/null | wc -l)
+            defined=$(nm -D "$f" 2>/dev/null | grep -cE " [TWA] ")
+            undefined=$(nm -D "$f" 2>/dev/null | grep -c " U ")
+            echo "Total: $total | Defined: $defined | Undefined (imports): $undefined"
+
+            # 8. Version references
+            echo "--- [8] Version References ---"
+            readelf -V "$f" 2>/dev/null | head -20 || echo "(none)"
+
+            # Step summary
+            ddk=$(strings "$f" | grep -E "^g[0-9]+p[0-9]" | head -1)
+            rk=$(strings "$f" | grep "rk_so_ver" | head -1)
+            echo "### File: \`$f\`" >> $GITHUB_STEP_SUMMARY
+            echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+            echo "| DDK | \`${ddk:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| rk_so_ver | \`${rk:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Size | $(ls -lh "$f" | awk '{print $5}') |" >> $GITHUB_STEP_SUMMARY
+            echo "| Symbols | $total ($defined exported, $undefined imported) |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done < mali_files.txt
+
+      - name: Comparison table
+        if: steps.find-mali.outputs.found != '0'
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os, json, re
+          
+          with open("mali_files.txt") as f:
+              files = [l.strip() for l in f if l.strip()]
+          
+          results = []
+          for so_path in files:
+              if not os.path.isfile(so_path): continue
+              r = {"path": so_path}
+              out = subprocess.run(["strings", so_path], capture_output=True, text=True)
+              for line in out.stdout.splitlines():
+                  if re.match(r'^g\d+p\d', line.strip()):
+                      r["ddk"] = line.strip()
+                  if "rk_so_ver" in line:
+                      m = re.search(r"rk_so_ver.*'([^']+)'", line)
+                      r["rk_so_ver"] = m.group(1) if m else line.strip()
+                  if not r.get("arch") and "Bifrost" in line:
+                      r["arch"] = "Bifrost"
+                  if not r.get("arch") and "Valhall" in line:
+                      r["arch"] = "Valhall"
+              r["size_mb"] = os.path.getsize(so_path) / (1024*1024)
+              
+              out = subprocess.run(["readelf", "-d", so_path], capture_output=True, text=True)
+              needed = [line.split("[")[1].split("]")[0] for line in out.stdout.splitlines() if "NEEDED" in line]
+              r["needed_count"] = len(needed)
+              r["needed"] = needed
+              
+              results.append(r)
+          
+          print("## DDK Compatibility Matrix")
+          print("")
+          print("| # | DDK | rk_so_ver | Size | Arch | Dependencies |")
+          print("|---|---|---|---|---|---|")
+          for i, r in enumerate(results):
+              deps = ", ".join(r.get("needed", [])[:3])
+              if r.get("needed_count", 0) > 3:
+                  deps += f" ... +{r['needed_count']-3}"
+              print(f"| {i+1} | {r.get('ddk','?')} | {r.get('rk_so_ver','?')} | {r['size_mb']:.1f}MB | {r.get('arch','?')} | {deps} |")
+              print(f"| | | | | | `{' '.join(r.get('needed',[]))}` |")
+          
+          print("")
+          print("### Kernel DDK: g18p0-01eac0")
+          print("| Userspace DDK | Gap | Expected Result |")
+          print("|---|---|---|")
+          print("| g15p0-g18p0 | 0-3 versions | ✅ Best match |")
+          print("| g13p0-g14p0 | 4-5 versions | ⚠️ May work (backward compat) |")
+          print("| g7p1 or older | 11+ versions | ❌ SIGSEGV (eglCreateImageKHR) |")
+          print("| g25p0 or newer | 7+ versions | ❌ Exit 129 (rk_so_ver too new) |")
+          PYEOF
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: mali-analysis
+          path: mali_files.txt
+          if-no-files-found: ignore
