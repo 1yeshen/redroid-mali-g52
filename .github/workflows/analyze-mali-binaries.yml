@@ -219,7 +219,6 @@ jobs:
       - name: '🔬 [11/30] Capstone Detailed Disassembly (first 1000 instructions)'
         continue-on-error: true
         if: steps.find-mali.outputs.found != '0'
-        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import subprocess, os
@@ -280,7 +279,6 @@ jobs:
       - name: '🔬 [12/30] Mega String Dump'
         continue-on-error: true
         if: steps.find-mali.outputs.found != '0'
-        continue-on-error: true
         run: |
           while IFS= read -r f; do
             echo "===== $f ====="
@@ -302,7 +300,6 @@ jobs:
       - name: '🔬 [13/30] MinHash + N-gram Analysis'
         continue-on-error: true
         if: steps.find-mali.outputs.found != '0'
-        continue-on-error: true
         run: |
           python3 << 'PYEOF'
           import os, hashlib
