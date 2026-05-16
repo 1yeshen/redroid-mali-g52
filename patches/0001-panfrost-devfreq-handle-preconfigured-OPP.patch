@@ -3,51 +3,41 @@ From: istore-ai <istoreai@istoreos.com>
 Date: Sat, 16 May 2026 19:30:00 +0800
 Subject: [PATCH] panfrost/devfreq: handle OPP pre-configured by platform code
 
-On Rockchip platforms, rockchip_opp_select populates GPU OPP config
-(regulators, supported-hw, OPP table) via the newer dev_pm_opp_set_config()
-API before panfrost probes. This clashes with panfrost's use of the older
-devm_pm_opp_set_regulators() API:
+On Rockchip platforms, rockchip_opp_select pre-populates the GPU OPP
+table before panfrost probes. This causes:
 
-  - set_regulators() returns -EBUSY  (regulators already configured)
-  - of_add_table()   returns -EEXIST (table already parsed)
-                    or -ENOENT  (no OPPs match pre-set supported-hw)
+  - devm_pm_opp_set_regulators() -> -EBUSY (regulators already set)
+  - devm_pm_opp_of_add_table()   -> -EEXIST (table already parsed)
+                                 or -ENOENT (no OPPs match supported_hw)
 
-Treat these as non-fatal:
-
-  -EBUSY  -> skip regulator setup (already done)
-  -EEXIST -> skip OPP table parsing (already done), reuse existing
-  -ENOENT -> no matching OPPs, continue without devfreq (GPU runs at
-             default clock; DVFS disabled)
-
-Without this fix, panfrost probe fails with -EBUSY or -ENOENT on
-RK3568/EasePi R1 running iStoreOS.
+Treat these as non-fatal so panfrost can continue with the existing
+OPP configuration. Without this fix, panfrost probe fails with -EBUSY
+or -ENOENT on RK3568/EasePi R1 running iStoreOS.
 
 Signed-off-by: istore-ai <istoreai@istoreos.com>
 ---
- drivers/gpu/drm/panfrost/panfrost_devfreq.c | 22 ++++++++++++++++------
- 1 file changed, 16 insertions(+), 6 deletions(-)
+ drivers/gpu/drm/panfrost/panfrost_devfreq.c | 21 +++++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/gpu/drm/panfrost/panfrost_devfreq.c b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-index 57ae3895ef82..15147999f8df 100644
+index 57ae3895ef82..217689895cb1 100644
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -134,19 +134,29 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+@@ -134,17 +134,27 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
  
  	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
  	if (ret) {
 -		/* Continue if the optional regulator is missing */
--		if (ret != -ENODEV) {
 +		if (ret == -EBUSY) {
-+			/* Already configured by platform (rockchip_opp_select) */
 +			dev_info(dev, "OPP already configured, skip set_regulators\n");
 +			goto opp_add_table;
 +		}
-+		if (ret != -ENODEV) {
++		/* -ENODEV: optional regulator missing, continue */
+ 		if (ret != -ENODEV) {
  			if (ret != -EPROBE_DEFER)
  				DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
  			return ret;
  		}
-+		/* -ENODEV: optional regulator missing, continue */
  	}
  
 +opp_add_table:
@@ -55,17 +45,14 @@ index 57ae3895ef82..15147999f8df 100644
  	if (ret) {
 -		/* Optional, continue without devfreq */
 -		if (ret == -ENODEV)
--			ret = 0;
--		return ret;
 +		if (ret == -EEXIST)
 +			dev_info(dev, "OPP table already populated, continuing\n");
 +		else if (ret == -ENODEV || ret == -ENOENT)
-+			/* No OPP table / no supported OPPs -> continue w/o devfreq */
-+			return 0;
++			/* No OPP table / no supported OPPs, continue w/o devfreq */
++			ret = 0;
 +		else
-+			return ret;
+ 			ret = 0;
+ 		return ret;
  	}
- 	pfdevfreq->opp_of_table_added = true;
- 
 -- 
 2.34.1
