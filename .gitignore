@@ -21,3 +21,6 @@ build/
 
 # Logs
 *.log
+
+# Local tools/binaries (e.g. x86-64 ELF RE tools)
+tools/
