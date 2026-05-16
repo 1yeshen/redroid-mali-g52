@@ -98,40 +98,47 @@ jobs:
           echo "=== Kernel release ==="
           cat include/config/kernel.release
 
-      - name: Build panfrost.ko
+      - name: Build DRM subsystem + panfrost.ko
         run: |
           cd /tmp/linux-${KERNEL_VERSION}
+          # Build the entire DRM subsystem including panfrost and all deps
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            M=drivers/gpu/drm/panfrost \
+            M=drivers/gpu/drm \
             modules
           echo "=== Build result ==="
+          echo "--- DRM modules built ---"
+          find drivers/gpu/drm/ -name "*.ko" -type f 2>/dev/null | sort
+          echo "--- panfrost.ko ---"
           ls -lh drivers/gpu/drm/panfrost/panfrost.ko 2>/dev/null || echo "BUILD FAILED"
 
       - name: Verify module vermagic
         run: |
-          echo "=== Built module vermagic ==="
-          /tmp/linux-${KERNEL_VERSION}/scripts/mod/modpost \
-            -i /tmp/linux-${KERNEL_VERSION}/Module.symvers \
-            -e /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/panfrost/panfrost.ko 2>&1 | \
-            grep -i vermagic || true
-          # Read vermagic via modinfo equivalent
-          aarch64-linux-gnu-objdump -s -j .modinfo \
-            /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/panfrost/panfrost.ko 2>/dev/null | \
-            grep -o "vermagic=[^\\x00]*" || true
+          cd /tmp/linux-${KERNEL_VERSION}
+          echo "=== Built modules vermagic ==="
+          for mod in $(find drivers/gpu/drm/ -name "*.ko" -type f | sort); do
+            VERMAGIC=$(aarch64-linux-gnu-objdump -s -j .modinfo "$mod" 2>/dev/null | grep -oa "vermagic=[^[:space:]]*" | head -1)
+            echo "$(basename $mod): $VERMAGIC"
+          done
 
-      - name: Upload panfrost.ko artifact
+      - name: Package DRM modules as tarball
+        run: |
+          cd /tmp/linux-${KERNEL_VERSION}
+          mkdir -p /tmp/drm-modules
+          find drivers/gpu/drm/ -name "*.ko" -type f | sort | while read f; do
+            cp --parents "$f" /tmp/drm-modules/
+          done
+          cp .config /tmp/drm-modules/
+          cd /tmp/drm-modules
+          tar czf /tmp/drm-modules-${KERNEL_VERSION}.tar.gz .
+          echo "=== Tarball contents ==="
+          tar tzf /tmp/drm-modules-${KERNEL_VERSION}.tar.gz
+
+      - name: Upload DRM modules artifact
         uses: actions/upload-artifact@v4
         with:
-          name: panfrost-ko-${KERNEL_VERSION}
-          path: /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/panfrost/panfrost.ko
+          name: drm-modules-${KERNEL_VERSION}
+          path: /tmp/drm-modules-${KERNEL_VERSION}.tar.gz
           if-no-files-found: error
-
-      - name: Upload full kernel config for reference
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-config-${KERNEL_VERSION}
-          path: /tmp/linux-${KERNEL_VERSION}/.config
-          if-no-files-found: ignore
 
       - name: Summary
         run: |
@@ -141,10 +148,12 @@ jobs:
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Kernel | ${KERNEL_VERSION} |" >> $GITHUB_STEP_SUMMARY
           echo "| Target | aarch64 (RK3568/EasePi R1) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Module | panfrost.ko |" >> $GITHUB_STEP_SUMMARY
+          echo "| DRM Module List | See artifact tarball |" >> $GITHUB_STEP_SUMMARY
           if [ -f /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/panfrost/panfrost.ko ]; then
             SIZE=$(stat -c%s /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/panfrost/panfrost.ko)
-            echo "| Size | $((SIZE / 1024)) KB |" >> $GITHUB_STEP_SUMMARY
+            echo "| panfrost.ko | $((SIZE / 1024)) KB |" >> $GITHUB_STEP_SUMMARY
+            TOTAL_MODS=$(find /tmp/linux-${KERNEL_VERSION}/drivers/gpu/drm/ -name "*.ko" -type f | wc -l)
+            echo "| Total DRM modules | ${TOTAL_MODS} |" >> $GITHUB_STEP_SUMMARY
             echo "| Status | ✅ Built successfully |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Status | ❌ Build failed |" >> $GITHUB_STEP_SUMMARY
