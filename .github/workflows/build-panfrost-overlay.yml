@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       redroid_version:
-        description: 'Base redroid image tag (e.g. 14.0.0-arch-fix, 14.0.0-latest)'
+        description: 'Base redroid image tag (e.g. 14.0.0-latest, 14.0.0-latest)'
         required: false
         default: '14.0.0-latest'
         type: string
@@ -67,7 +67,7 @@ jobs:
           tags: |
             type=raw,value=panfrost-latest,enable={{is_default_branch}}
             type=sha,prefix=panfrost-,format=short
-            type=raw,value=panfrost-${{ github.event.inputs.redroid_version || '14.0.0-arch-fix' }}
+            type=raw,value=panfrost-${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -77,7 +77,7 @@ jobs:
           file: docker/Dockerfile.panfrost
           platforms: linux/arm64
           build-args: |
-            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-arch-fix' }}
+            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event.inputs.push_to_ghcr != 'false' }}
@@ -90,7 +90,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-arch-fix' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Mali init | ❌ Disabled (overridden with no-op files) |" >> $GITHUB_STEP_SUMMARY
           echo "| Panfrost init | ✅ Added (Mesa/GBM/panfrost props) |" >> $GITHUB_STEP_SUMMARY
           echo "| GPU driver | ✅ Panfrost (kernel: \`panfrost.ko\`, userspace: Mesa) |" >> $GITHUB_STEP_SUMMARY
