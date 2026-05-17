@@ -9,54 +9,84 @@ table before panfrost probes. This causes:
   - devm_pm_opp_set_regulators() -> -EBUSY (regulators already set)
   - devm_pm_opp_of_add_table()   -> -EEXIST (table already parsed)
                                  or -ENOENT (no OPPs match supported_hw)
+  - devfreq_recommended_opp()    -> -ENOENT (empty OPP table after
+                                   supported_hw corruption)
 
 Treat these as non-fatal so panfrost can continue with the existing
-OPP configuration. Without this fix, panfrost probe fails with -EBUSY
-or -ENOENT on RK3568/EasePi R1 running iStoreOS.
+OPP configuration. When the OPP table is empty or unusable (after
+Mali driver partially cleans up rockchip_opp_select state), skip
+devfreq frequency scaling and let the GPU run at its current clock.
+
+Without this fix, panfrost probe fails with -EBUSY or -ENOENT on
+RK3568/EasePi R1 running iStoreOS.
 
 Signed-off-by: istore-ai <istoreai@istoreos.com>
 ---
- drivers/gpu/drm/panfrost/panfrost_devfreq.c | 18 ++++++++++++++----
- 1 file changed, 14 insertions(+), 4 deletions(-)
+ drivers/gpu/drm/panfrost/panfrost_devfreq.c | 30 ++++++++++++++++++-----------
+ 1 file changed, 19 insertions(+), 11 deletions(-)
 
 diff --git a/drivers/gpu/drm/panfrost/panfrost_devfreq.c b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-index 57ae3895ef82..e62edd6 100644
+index 57ae3895ef82..4bb0373 100644
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -133,7 +133,12 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+@@ -133,20 +133,28 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
  
  	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
  	if (ret) {
 -		/* Continue if the optional regulator is missing */
+-		if (ret != -ENODEV) {
+-			if (ret != -EPROBE_DEFER)
+-				DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
+-			return ret;
+-		}
 +		/* -EBUSY: OPP already configured by platform code */
-+		if (ret == -EBUSY) {
-+			dev_info(dev, "OPP regulators already configured, continuing\n");
++		if (ret == -EBUSY)
 +			goto skip_set_regulators;
-+		}
 +		/* -ENODEV: optional regulator missing, continue */
- 		if (ret != -ENODEV) {
- 			if (ret != -EPROBE_DEFER)
- 				DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
-@@ -141,12 +146,17 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
- 		}
++		if (ret == -ENODEV)
++			goto skip_set_regulators;
++		/* Any other error is fatal */
++		if (ret != -EPROBE_DEFER)
++			DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
++		return ret;
  	}
  
 +skip_set_regulators:
  	ret = devm_pm_opp_of_add_table(dev);
  	if (ret) {
- 		/* Optional, continue without devfreq */
+-		/* Optional, continue without devfreq */
 -		if (ret == -ENODEV)
 -			ret = 0;
 -		return ret;
-+		if (ret == -EEXIST)
++		if (ret == -EEXIST) {
 +			dev_info(dev, "OPP table already populated, continuing\n");
-+		else if (ret == -ENODEV || ret == -ENOENT)
-+			/* No OPP table / no supported OPPs, continue w/o devfreq */
-+			return 0;
++			pfdevfreq->opp_of_table_added = true;
++		} else if (ret == -ENODEV || ret == -ENOENT)
++			goto no_opp;
 +		else
 +			return ret;
  	}
  	pfdevfreq->opp_of_table_added = true;
  
+@@ -158,7 +166,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+ 
+ 	opp = devfreq_recommended_opp(dev, &cur_freq, 0);
+ 	if (IS_ERR(opp))
+-		return PTR_ERR(opp);
++		goto no_opp;
+ 
+ 	panfrost_devfreq_profile.initial_freq = cur_freq;
+ 
+@@ -197,6 +205,10 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+ 		pfdevfreq->cooling = cooling;
+ 
+ 	return 0;
++
++no_opp:
++	dev_info(dev, "OPP unavailable, running GPU without devfreq\n");
++	return 0;
+ }
+ 
+ void panfrost_devfreq_fini(struct panfrost_device *pfdev)
 -- 
 2.34.1
