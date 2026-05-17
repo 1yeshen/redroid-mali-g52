@@ -15,13 +15,13 @@ Custom **redroid** (Android in Docker) image with **Mali-G52 GPU hardware accele
 | Mali /dev/mali0 detection | ✅ | `--mount bind` preserves inode (fixes Issue #228) |
 | Mali userspace driver load | ⚠️ | g25p0 passes init (rk_so_ver patched 10→8), GPU not functional |
 | SurfaceFlinger GPU init | ❌ | DDK mismatch: kernel g18p0 vs available userspace drivers |
-| **Panfrost kernel module** | **✅ Built** | Cross-compiled for 6.6.127, vermagic matches |
-| **Panfrost module load** | **⚠️ Probe fails (-ENOENT)** | Panfrost loads as module; probe fails due to OPP corruption left by Mali `rockchip_init_opp_info()` |
+| **Panfrost kernel module (v3 patch)** | **✅ Built** | Cross-compiled for 6.6.127, vermagic matches |
+| **Panfrost probe (deployed)** | **✅ SUCCESS** | `/dev/dri/renderD128` — GPU initialized without devfreq (OPP patch handles `-ENOENT`) |
 | **`opp-fix.ko` (OPP recovery module)** | **✅ Built** | Fallback: clears `supported_hw` filter, re-adds DT OPP entries post-Mali |
-| **`load-panfrost-fixed.sh` workflow** | **✅ Script ready** | Mali→unbind→opp-fix→bind Panfrost, verified on device |
+| **`load-panfrost-fixed.sh` workflow** | **✅ Script ready** | Mali→unbind→opp-fix→load Panfrost, verified on device |
 | **CI patch (v3) — handle all OPP failures** | **✅ Built & passing** | Handles `-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` errors in `panfrost_devfreq.c` |
 | **Hardware acceleration (Mali)** | ❌ | Pending matching (g13p0–g18p0) bionic userspace driver |
-| **Hardware acceleration (Panfrost)** | **🔄 In progress** | CI patch passing → deploy modules → reboot → verify renderD128 → Mesa for Android |
+| **Hardware acceleration (Panfrost)** | **🔄 In progress** | `/dev/dri/renderD128` ✅ → Standard redroid image already has Mesa Panfrost libs → Testing container GPU |
 
 **Root cause (Mali DDK):** The kernel's Mali Bifrost module (`bifrost_kbase.ko`) is compiled at DDK **g18p0-01eac0** (≈r46p0), but all available Android (bionic) userspace Mali drivers are at incompatible DDK versions.
 
@@ -55,7 +55,10 @@ After exhausting the closed-source Mali userspace driver approach (see [DDK Comp
 | 9. CI patch (v1) | ✅ | Two-hunk patch worked: handles `-EBUSY`, `-EEXIST`, `-ENOENT` from pre-configured OPP |
 | 10. CI patch (v2→v3 fix) | ✅ | Rewrite: handles all OPP failure paths (`-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` errors) |
 | 11. Disable Mali auto-load | ✅ | `mv /etc/modules.d/85-rkgpu-mali400 /etc/modules.d/85-rkgpu-mali400.disabled` |
-| 12. Build Mesa for Android (bionic) | 🔜 | Cross-compile Mesa with `-Dgallium-drivers=panfrost` for Android container |
+| 12. Deploy & reboot (EasePi R1) | ✅ | Rebooted with Mali blacklisted, new panfrost.ko auto-loaded via `/etc/modules.d/90-panfrost` |
+| 13. **Panfrost probe success** | **✅** | **`/dev/dri/renderD128` initialized** — Mali-G52 detected, running without devfreq (OPP patch handles `-ENOENT`) |
+| 14. Discover: redroid image has Mesa Panfrost | ✅ | Standard `redroid:14.0.0-arch-fix` already includes `panfrost_dri.so`, `vulkan.panfrost.so`, `gralloc.gbm.so`, `libEGL_mesa.so` |
+| 15. Build Mesa for Android (bionic) | 🔜 | **Maybe not needed** — redroid image ships Mesa with Panfrost. Issue: container GPU detection picks Mali path instead of Panfrost |
 
 ### How the Panfrost Kernel Module Was Built
 
@@ -507,7 +510,8 @@ This fixes the SIGHUP (exit 129) during init, allowing the container to boot. Ho
 2. **Binder ABI**: Kernel 6.6 binder ABI is incompatible with Android 14's libbinder (oneway spam handling changed). This causes `servicemanager` and `hwservicemanager` to be zombie. GPU HAL should still load correctly since it communicates via kernel driver, not binder.
 3. **Missing bionic g13p0 driver**: The correct userspace driver (g13p0 bionic) has not been found in public repositories. It must be extracted from Rockchip's internal Android SDK.
 4. **Panfrost OPP conflict**: Mali's OPP pre-configuration leaves corrupted `supported_hw` state. The kernel patch to `panfrost_devfreq.c` handles all OPP failure paths, allowing Panfrost to probe without devfreq. If Mali has already loaded, `opp-fix.ko` provides a fallback to repair OPP state.
-5. **Panfrost Mesa build**: Building Mesa for Android (bionic) with Panfrost Gallium driver is still in progress. The pre-built Mesa from `wode2016501/mesa-for-android-container` is for glibc containers and cannot be used directly in redroid.
+5. **Panfrost Mesa availability**: Standard redroid image (`redroid:14.0.0-arch-fix`) already ships Mesa with Panfrost Gallium and Vulkan drivers (`panfrost_dri.so`, `vulkan.panfrost.so`, `gralloc.gbm.so`, `libEGL_mesa.so`). The remaining challenge is ensuring the container's GPU config script correctly detects Panfrost (not Mali) when `gpu_mode=host` is used.
+6. **Binder ABI (kernel 6.6)**: Kernel 6.6 binder ABI incompatibility with Android 14's libbinder causes `servicemanager` to be zombie. This affects both Mali and Panfrost approaches.
 
 ## References
 

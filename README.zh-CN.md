@@ -55,7 +55,10 @@
 | 9. CI 补丁（v1） | ✅ | 双 hunk 补丁可用：处理 `-EBUSY`、`-EEXIST`、`-ENOENT` |
 | 10. CI 补丁（v2→v3 修复） | ✅ | 重写：处理所有 OPP 失败路径（`-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` 错误） |
 | 11. 禁用 Mali 自动加载 | ✅ | `mv /etc/modules.d/85-rkgpu-mali400 /etc/modules.d/85-rkgpu-mali400.disabled` |
-| 12. 构建 Mesa for Android (bionic) | 🔜 | 用 `-Dgallium-drivers=panfrost` 交叉编译 Mesa 用于 Android 容器 |
+| 12. 部署并重启 (EasePi R1) | ✅ | 重启后 Mali 黑名单生效，新 panfrost.ko 通过 `/etc/modules.d/90-panfrost` 自动加载 |
+| 13. **Panfrost probe 成功** | **✅** | **`/dev/dri/renderD128` 初始化成功** — Mali-G52 已检测，无 devfreq 运行（OPP 补丁处理 `-ENOENT`） |
+| 14. 发现：redroid 镜像已含 Mesa Panfrost | ✅ | 标准 `redroid:14.0.0-arch-fix` 已包含 `panfrost_dri.so`、`vulkan.panfrost.so`、`gralloc.gbm.so`、`libEGL_mesa.so` |
+| 15. 构建 Mesa for Android (bionic) | 🔜 | **可能不需要** — redroid 镜像自带 Mesa Panfrost。问题：容器 GPU 检测走 Mali 路径而非 Panfrost |
 
 ### Panfrost 内核模块构建方式
 
@@ -505,7 +508,8 @@ Mali Bifrost DDK 使用命名规则 `gXXpY`：
 2. **Binder ABI**：内核 6.6 的 binder ABI 与 Android 14 的 libbinder 不兼容（单向垃圾邮件处理方式已更改）。这导致 `servicemanager` 和 `hwservicemanager` 处于僵尸状态。GPU HAL 应仍能正确加载，因为它通过内核驱动通信，而不是 binder
 3. **缺少 bionic g13p0 驱动**：正确的用户态驱动（g13p0 bionic）在公开仓库中尚未找到。必须从 Rockchip 的内部 Android SDK 中提取
 4. **Panfrost OPP 冲突**：Mali 的 OPP 预配置留下损坏的 `supported_hw` 状态。`panfrost_devfreq.c` 的内核补丁处理所有 OPP 失败路径，使 Panfrost 可在无 devfreq 的情况下 probe。如果 Mali 已加载，`opp-fix.ko` 提供后备方案修复 OPP 状态
-5. **Panfrost Mesa 构建**：为 Android (bionic) 构建带 Panfrost Gallium 驱动的 Mesa 仍在进行中。`wode2016501/mesa-for-android-container` 的预构建 Mesa 用于 glibc 容器，不能直接在 redroid 中使用
+5. **Panfrost Mesa 可用性**：标准 redroid 镜像（`redroid:14.0.0-arch-fix`）已包含 Mesa Panfrost Gallium 和 Vulkan 驱动（`panfrost_dri.so`、`vulkan.panfrost.so`、`gralloc.gbm.so`、`libEGL_mesa.so`）。剩余挑战是确保容器的 GPU 配置脚本正确检测 Panfrost（而非 Mali）
+6. **Binder ABI（内核 6.6）**：内核 6.6 的 binder ABI 与 Android 14 的 libbinder 不兼容，导致 `servicemanager` 处于僵尸状态。这同时影响 Mali 和 Panfrost 方案
 
 ## 参考
 
