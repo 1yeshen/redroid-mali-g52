@@ -1,0 +1,16 @@
+# ============================================================
+# Panfrost GPU initialization for RK3568 (redroid)
+# Overrides Mali defaults to use Mesa/Panfrost EGL/gralloc
+# ============================================================
+
+on early-init
+    chmod 0666 /dev/dri/renderD128
+    chmod 0666 /dev/dri/card0
+
+on boot
+    setprop ro.hardware.egl mesa
+    setprop ro.hardware.gralloc gbm
+    setprop ro.hardware.vulkan panfrost
+    setprop ro.boot.gpu_mode host
+    setprop ro.boot.redroid_fps 30
+    exec u:r:shell:s0 -- /system/bin/log -t PanfrostGPU -p i "Mesa/Panfrost GPU HAL initialized"
