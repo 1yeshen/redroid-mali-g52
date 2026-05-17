@@ -14,7 +14,7 @@
 # vulkan.panfrost.so, gralloc.gbm.so, libEGL_mesa.so) are
 # ALREADY included in the standard redroid image.
 # ============================================================
-ARG REDROID_BASE=redroid/redroid:14.0.0-arch-fix
+ARG REDROID_BASE=redroid/redroid:14.0.0-latest
 FROM ${REDROID_BASE}
 
 # Override Mali GPU init scripts with empty/no-op files
