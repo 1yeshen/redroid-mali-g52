@@ -23,19 +23,9 @@ FROM ${REDROID_BASE}
 # These are just defaults; gpu_config.sh will auto-detect anyway
 ENV TARGET_BOARD_PLATFORM_GPU=panfrost
 
-# Add a small diagnostic script for Panfrost GPU verification
-# This can be run inside the container to check GPU state
-RUN echo '#!/system/bin/sh\n\
-echo "=== Panfrost GPU Diagnostics ==="\n\
-echo "DRI nodes:"\n\
-ls -la /dev/dri/ 2>/dev/null || echo "  No /dev/dri/ found (GPU devices not mounted)"\n\
-echo ""\n\
-echo "GPU properties:"\n\
-getprop | grep -E "(egl|gralloc|vulkan|gpu|render)"\n\
-echo ""\n\
-echo "SurfaceFlinger GLES:"\n\
-dumpsys SurfaceFlinger 2>/dev/null | grep GLES || echo "  SurfaceFlinger not running"\n\
-' > /system/bin/panfrost-diag && chmod 755 /system/bin/panfrost-diag
+# NOTE: No RUN instructions allowed! The redroid base image is an Android
+# system image without a standard Linux shell. Only LABEL, ENV, and other
+# OCI metadata instructions work.
 
 LABEL description="redroid with Panfrost GPU acceleration for RK3568 (Mali-G52)"
 LABEL gpu.driver="panfrost"
