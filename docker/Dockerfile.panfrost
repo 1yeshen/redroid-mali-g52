@@ -1,35 +1,43 @@
 # ============================================================
 # Dockerfile.panfrost
 #
-# Build a custom redroid Docker image with Panfrost GPU
-# support for RK3568 devices (EasePi R1, Radxa ROCK3A/B, etc.)
+# Minimal Docker overlay for Panfrost GPU acceleration on
+# RK3568 devices (EasePi R1, Radxa ROCK3A/B, etc.).
 #
-# Strategy: The Mali GPU init scripts in the base redroid
-# image unconditionally set Mali GPU properties on boot,
-# overriding gpu_mode=host. This overlay:
-#   1. Overrides Mali .rc files with empty (no-op) files
-#   2. Adds a Panfrost-specific .rc that sets Mesa/GBM props
+# Why this is minimal:
+#   The base image (redroid/redroid:14.0.0_64only-latest) ALREADY:
+#   1. Ships Mesa with Panfrost Gallium & Vulkan drivers
+#      (panfrost_dri.so, vulkan.panfrost.so, gralloc.gbm.so)
+#   2. Has vendor_redroid's gpu_config.sh which auto-detects
+#      Panfrost via /sys/kernel/debug/dri/*/name
+#   3. Has NO Mali init scripts to override (unlike older images)
 #
-# The Panfrost Mesa userspace libraries (panfrost_dri.so,
-# vulkan.panfrost.so, gralloc.gbm.so, libEGL_mesa.so) are
-# ALREADY included in the standard redroid image.
+# So this overlay only adds metadata and convenience defaults.
+# The real magic happens at runtime when gpu_config.sh sees
+# the "panfrost" driver and sets all GPU properties correctly.
 # ============================================================
-ARG REDROID_BASE=redroid/redroid:14.0.0-latest
+ARG REDROID_BASE=redroid/redroid:14.0.0_64only-latest
 FROM ${REDROID_BASE}
 
-# Override Mali GPU init scripts with empty/no-op files
-# This prevents them from setting:
-#   ro.hardware.egl=mali
-#   ro.hardware.gralloc=bifrost
-#   ro.hardware.vulkan=mali
-#   ro.boot.gpu_mode=mali
-COPY docker/panfrost-config/empty.rc /vendor/etc/init/init.mali_gpu.rc
-COPY docker/panfrost-config/empty.rc /vendor/etc/init/init.rockchip.gpu.rc
-COPY docker/panfrost-config/empty.rc /vendor/etc/init/gpu_config_mali.sh
+# Convenience environment variables (can be overridden at runtime)
+# These are just defaults; gpu_config.sh will auto-detect anyway
+ENV TARGET_BOARD_PLATFORM_GPU=panfrost
 
-# Add Panfrost GPU init script (sets Mesa/GBM/panfrost properties)
-COPY docker/panfrost-config/init.panfrost_gpu.rc /vendor/etc/init/init.panfrost_gpu.rc
+# Add a small diagnostic script for Panfrost GPU verification
+# This can be run inside the container to check GPU state
+RUN echo '#!/system/bin/sh\n\
+echo "=== Panfrost GPU Diagnostics ==="\n\
+echo "DRI nodes:"\n\
+ls -la /dev/dri/ 2>/dev/null || echo "  No /dev/dri/ found (GPU devices not mounted)"\n\
+echo ""\n\
+echo "GPU properties:"\n\
+getprop | grep -E "(egl|gralloc|vulkan|gpu|render)"\n\
+echo ""\n\
+echo "SurfaceFlinger GLES:"\n\
+dumpsys SurfaceFlinger 2>/dev/null | grep GLES || echo "  SurfaceFlinger not running"\n\
+' > /system/bin/panfrost-diag && chmod 755 /system/bin/panfrost-diag
 
 LABEL description="redroid with Panfrost GPU acceleration for RK3568 (Mali-G52)"
 LABEL gpu.driver="panfrost"
 LABEL gpu.mode="host"
+LABEL gpu.auto_detect="vendor_redroid/gpu_config.sh auto-detects Panfrost via debugfs"

@@ -1,0 +1,3 @@
+[submodule "vendor/redroid"]
+	path = vendor/redroid
+	url = https://github.com/remote-android/vendor_redroid.git

@@ -1,12 +1,17 @@
 # ============================================================
 # build-panfrost-overlay.yml
 #
-# Build a custom redroid Docker image with Panfrost GPU
-# support for RK3568 devices (EasePi R1, Radxa ROCK3A/B, etc.)
+# Build a minimal Docker overlay with Panfrost GPU metadata
+# for RK3568 devices (EasePi R1, Radxa ROCK3A/B, etc.)
 #
-# The standard redroid image already ships Mesa with Panfrost
-# Gallium and Vulkan drivers. This overlay disables the Mali
-# init scripts and enables Mesa/Panfrost GPU mode.
+# The base image redroid/redroid:14.0.0_64only-latest ALREADY:
+#   ✓ Ships Mesa with Panfrost Gallium & Vulkan drivers
+#   ✓ Has vendor_redroid's gpu_config.sh (auto-detects Panfrost)
+#   ✓ Has NO Mali init scripts (unlike older images)
+#
+# So this overlay is intentionally minimal - it just adds
+# labels and diagnostic tools. The GPU magic happens when
+# gpu_config.sh detects "panfrost" driver at runtime.
 # ============================================================
 
 name: Build Panfrost Overlay
@@ -15,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       redroid_version:
-        description: 'Base redroid image tag (e.g. 14.0.0-latest, 14.0.0-latest)'
+        description: 'Base redroid image tag (e.g. 14.0.0_64only-latest)'
         required: false
-        default: '14.0.0-latest'
+        default: '14.0.0_64only-latest'
         type: string
       push_to_ghcr:
         description: 'Push image to GitHub Container Registry'
@@ -28,7 +33,6 @@ on:
     branches: [main]
     paths:
       - 'docker/Dockerfile.panfrost'
-      - 'docker/panfrost-config/**'
       - '.github/workflows/build-panfrost-overlay.yml'
 
 env:
@@ -67,7 +71,7 @@ jobs:
           tags: |
             type=raw,value=panfrost-latest,enable={{is_default_branch}}
             type=sha,prefix=panfrost-,format=short
-            type=raw,value=panfrost-${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
+            type=raw,value=panfrost-${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -77,7 +81,7 @@ jobs:
           file: docker/Dockerfile.panfrost
           platforms: linux/arm64
           build-args: |
-            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}
+            REDROID_BASE=redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event.inputs.push_to_ghcr != 'false' }}
@@ -90,22 +94,28 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0-latest' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Mali init | ❌ Disabled (overridden with no-op files) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Panfrost init | ✅ Added (Mesa/GBM/panfrost props) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Base image | \`redroid/redroid:${{ github.event.inputs.redroid_version || '14.0.0_64only-latest' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mali init | N/A (not present in _64only base) |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU detection | ✅ Auto-detect by vendor_redroid/gpu_config.sh |" >> $GITHUB_STEP_SUMMARY
           echo "| GPU driver | ✅ Panfrost (kernel: \`panfrost.ko\`, userspace: Mesa) |" >> $GITHUB_STEP_SUMMARY
           echo "| Output image | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### How to use on EasePi R1 (RK3568)" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo '# Prerequisites: panfrost.ko loaded on host, /dev/dri/renderD128 exists' >> $GITHUB_STEP_SUMMARY
-          echo 'docker run -d --privileged \' >> $GITHUB_STEP_SUMMARY
-          echo '  --name redroid-panfrost \' >> $GITHUB_STEP_SUMMARY
-          echo '  -v /dev/dri:/dev/dri \' >> $GITHUB_STEP_SUMMARY
-          echo '  -v /data-panfrost:/data \' >> $GITHUB_STEP_SUMMARY
-          echo '  -p 5555:5555 \' >> $GITHUB_STEP_SUMMARY
-          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:panfrost-latest \\" >> $GITHUB_STEP_SUMMARY
-          echo '  androidboot.redroid_gpu_mode=host \' >> $GITHUB_STEP_SUMMARY
-          echo '  androidboot.use_memfd=true' >> $GITHUB_STEP_SUMMARY
+           echo '# Prerequisites: panfrost.ko loaded on host, /dev/dri/renderD128 exists' >> $GITHUB_STEP_SUMMARY
+           echo '# IMPORTANT: Use --device (NOT -v /dev:/dev) to avoid SIGBUS' >> $GITHUB_STEP_SUMMARY
+           echo 'docker run -d --privileged \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --name redroid-panfrost \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --device /dev/dri/renderD128:/dev/dri/renderD128 \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --device /dev/dri/card0:/dev/dri/card0 \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --device /dev/binderfs/binder:/dev/binder \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --device /dev/binderfs/hwbinder:/dev/hwbinder \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --device /dev/binderfs/vndbinder:/dev/vndbinder \\' >> $GITHUB_STEP_SUMMARY
+           echo '  --device /dev/dma_heap:/dev/dma_heap \\' >> $GITHUB_STEP_SUMMARY
+           echo '  -v /data-panfrost:/data \\' >> $GITHUB_STEP_SUMMARY
+           echo '  -p 5555:5555 \\' >> $GITHUB_STEP_SUMMARY
+           echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:panfrost-latest \\" >> $GITHUB_STEP_SUMMARY
+           echo '  androidboot.redroid_gpu_mode=host \\' >> $GITHUB_STEP_SUMMARY
+           echo '  androidboot.use_memfd=true' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,220 @@
+# ============================================================
+# build-custom-aosp-panfrost.yml
+#
+# Full AOSP build of redroid (Android 14, 64-bit only) with
+# Panfrost GPU auto-detection via vendor_redroid.
+#
+# Key design decisions:
+#   1. Uses remote-android's official build method:
+#      AOSP manifest + local_manifests for redroid components
+#   2. vendor_redroid's gpu_config.sh ALREADY supports Panfrost
+#      out of the box (auto-detects via /sys/kernel/debug/dri)
+#   3. NO Mali-specific build flags needed
+#   4. Build target: redroid_arm64_only-userdebug (64-bit only)
+#      → This matches redroid/redroid:14.0.0_64only-latest
+#
+# The resulting image is equivalent to the official
+# redroid/redroid:14.0.0_64only-latest but built from source,
+# which means it inherits vendor_redroid's Panfrost support
+# automatically.
+#
+# Runner requirements:
+#   - ~200GB free disk
+#   - 16GB+ RAM
+#   - Recommended: ubuntu-24.04-16core (paid larger runner)
+#   - Build time: ~2-5 hours depending on hardware
+# ============================================================
+
+name: Build Custom AOSP - Panfrost (RK3568)
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_tag:
+        description: 'AOSP manifest tag (e.g. android-14.0.0_r75)'
+        required: false
+        default: 'android-14.0.0_r75'
+        type: string
+      runner_size:
+        description: 'GitHub runner size'
+        required: false
+        default: 'ubuntu-24.04-8core'
+        type: choice
+        options:
+          - 'ubuntu-24.04-8core'
+          - 'ubuntu-24.04-16core'
+      push_to_ghcr:
+        description: 'Push image to GHCR'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  ANDROID_TAG: ${{ github.event.inputs.android_tag || 'android-14.0.0_r75' }}
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner_size || 'ubuntu-24.04-8core' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          echo "[*] Disk before cleanup:"
+          df -h /
+          # Remove unnecessary pre-installed tools to free space
+          sudo rm -rf /opt/hostedtoolcache 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet 2>/dev/null || true
+          sudo rm -rf /usr/local/share/boost 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android 2>/dev/null || true
+          sudo rm -rf /usr/local/.ghcup 2>/dev/null || true
+          sudo rm -rf /opt/ghc 2>/dev/null || true
+          echo "[*] Disk after cleanup:"
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            gcc-multilib g++-multilib libc6-dev-i386 libncurses5 \
+            lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev \
+            libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig \
+            sudo rsync python3 python3-pip pkg-config python3-dev ninja-build \
+            jq xmllint
+          sudo pip3 install mako meson
+
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/.bin
+          curl -sS https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
+          chmod a+x ~/.bin/repo
+          echo "$HOME/.bin" >> $GITHUB_PATH
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "CI Builder"
+
+      - name: Initialize AOSP repo (official manifest)
+        run: |
+          mkdir -p aosp
+          cd aosp
+          echo "[*] Initializing AOSP with tag: ${{ env.ANDROID_TAG }}"
+          repo init -u https://android.googlesource.com/platform/manifest \
+            --git-lfs --depth=1 -b ${{ env.ANDROID_TAG }}
+
+      - name: Add redroid local manifests
+        run: |
+          cd aosp
+          echo "[*] Adding remote-android local_manifests (branch: 14.0.0)"
+          git clone https://github.com/remote-android/local_manifests.git \
+            .repo/local_manifests -b 14.0.0
+
+      - name: Sync AOSP source
+        run: |
+          cd aosp
+          echo "[*] Syncing AOSP source (~100GB)..."
+          repo sync -c -j$(nproc) --no-clone-bundle 2>&1
+          echo "[*] Sync complete. Checking WebView apks..."
+          find external/chromium-webview -name "*.apk" -exec du -h {} + 2>/dev/null || true
+
+      - name: Apply redroid patches
+        run: |
+          cd aosp
+          echo "[*] Applying redroid patches for ${{ env.ANDROID_TAG }}..."
+          git clone https://github.com/remote-android/redroid-patches.git \
+            ~/redroid-patches
+          bash ~/redroid-patches/apply-patch.sh "$PWD" "${{ env.ANDROID_TAG }}" 2>&1
+          echo "[*] Patches applied."
+
+      - name: Build AOSP (target: redroid_arm64_only-userdebug)
+        run: |
+          cd aosp
+          source build/envsetup.sh
+          lunch redroid_arm64_only-userdebug
+          echo "[*] Starting build with $(nproc) parallel jobs..."
+          echo "    Target: redroid_arm64_only-userdebug"
+          echo "    GPU: Panfrost (auto-detected by vendor_redroid's gpu_config.sh)"
+          m -j$(nproc) 2>&1 | tee build.log
+          echo "[*] Build complete. Checking output:"
+          ls -lh out/target/product/redroid_arm64_only/system.img 2>/dev/null || \
+            ls -lh out/target/product/redroid_arm64_only/ 2>/dev/null || true
+
+      - name: Create Docker image from build output
+        run: |
+          cd aosp/out/target/product/redroid_arm64_only
+          echo "[*] Creating Docker image from build artifacts..."
+          echo "    Mounting system.img and vendor.img..."
+          mkdir -p system vendor
+          sudo mount system.img system -o ro
+          sudo mount vendor.img vendor -o ro
+          echo "    Importing to Docker..."
+          # Build tag: android-14.0.0_r75 → 14.0.0_r75
+          TAG_SUFFIX="${{ env.ANDROID_TAG }}"
+          sudo tar --xattrs -c vendor -C system --exclude="./vendor" . | \
+            docker import --platform=linux/arm64 \
+            -c 'ENTRYPOINT ["/init", "androidboot.hardware=redroid"]' \
+            - redroid:${TAG_SUFFIX}-panfrost
+          sudo umount system vendor
+          echo "[*] Docker image created:"
+          docker images | grep redroid
+
+      - name: Log in to GHCR
+        if: ${{ github.event.inputs.push_to_ghcr != 'false' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push Docker image to GHCR
+        if: ${{ github.event.inputs.push_to_ghcr != 'false' }}
+        run: |
+          TAG_SUFFIX="${{ env.ANDROID_TAG }}"
+          # Primary tag: e.g., android-14.0.0_r75-panfrost
+          docker tag redroid:${TAG_SUFFIX}-panfrost \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG_SUFFIX}-panfrost
+          # Also tag as 'panfrost-latest'
+          docker tag redroid:${TAG_SUFFIX}-panfrost \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:panfrost-latest
+          # Push
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG_SUFFIX}-panfrost
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:panfrost-latest
+
+      - name: Build summary
+        run: |
+          echo "## ✅ Custom AOSP Build Complete (Panfrost)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| AOSP tag | ${{ env.ANDROID_TAG }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build target | \`redroid_arm64_only-userdebug\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU detection | ✅ Panfrost auto-detect by \`vendor_redroid/gpu_config.sh\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build system | \`remote-android\` standard (AOSP manifest + local_manifests) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner | ${{ github.event.inputs.runner_size }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image tags | \`${{ env.ANDROID_TAG }}-panfrost\`, \`panfrost-latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage on EasePi R1 (RK3568)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Run directly (or use \`scripts/run-redroid-panfrost.sh\`):" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'docker run -d --privileged \' >> $GITHUB_STEP_SUMMARY
+          echo '  --name redroid-panfrost \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/dri/renderD128:/dev/dri/renderD128 \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/dri/card0:/dev/dri/card0 \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/binderfs/binder:/dev/binder \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/binderfs/hwbinder:/dev/hwbinder \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/binderfs/vndbinder:/dev/vndbinder \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/rga:/dev/rga \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/mpp_service:/dev/mpp_service \' >> $GITHUB_STEP_SUMMARY
+          echo '  --device /dev/dma_heap:/dev/dma_heap \' >> $GITHUB_STEP_SUMMARY
+          echo '  -v /data-redroid:/data \' >> $GITHUB_STEP_SUMMARY
+          echo '  -p 5555:5555 \' >> $GITHUB_STEP_SUMMARY
+          echo '  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:panfrost-latest \' >> $GITHUB_STEP_SUMMARY
+          echo '  androidboot.redroid_gpu_mode=host \' >> $GITHUB_STEP_SUMMARY
+          echo '  androidboot.use_memfd=true' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
