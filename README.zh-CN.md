@@ -16,18 +16,18 @@
 | Mali 用户态驱动加载 | ⚠️ | g25p0 通过 init 阶段（rk_so_ver 修补 10→8），GPU 不可用 |
 | SurfaceFlinger GPU 初始化 | ❌ | DDK 不匹配：内核 g18p0 vs 可用用户态驱动 |
 | **Panfrost 内核模块** | **✅ 已构建** | 为 6.6.127 交叉编译，vermagic 匹配 |
-| **Panfrost 模块加载（内置）** | **⚠️ probe 失败 (-ENOENT)** | 内置 Panfrost 处理了 -EBUSY，但未处理 -ENOENT（OPP 状态损坏） |
-| **`opp-fix.ko`（OPP 修复模块）** | **✅ 已构建** | 清除 `supported_hw` 过滤器，重新添加 DT OPP 条目 |
-| **`load-panfrost-fixed.sh` 工作流** | **✅ 脚本就绪** | Mali→解绑定→opp-fix→绑定 Panfrost，已在设备验证 |
-| **通过 opp-fix 的 Panfrost probe** | **🔄 等待 CI 修复** | CI 补丁上下文不匹配；v1 补丁可用，v2 需修正 |
+| **Panfrost 模块加载** | **⚠️ Probe 失败 (-ENOENT)** | Panfrost 以模块加载；probe 因 Mali `rockchip_init_opp_info()` 遗留的 OPP 损坏而失败 |
+| **`opp-fix.ko`（OPP 修复模块）** | **✅ 已构建** | 后备方案：清除 `supported_hw` 过滤器，重新添加 DT OPP 条目 |
+| **`load-panfrost-fixed.sh` 工作流** | **✅ 脚本就绪** | Mali→解绑定→opp-fix→加载 Panfrost，已在设备验证 |
+| **CI 补丁 (v3) — 处理所有 OPP 失败** | **✅ 构建通过** | 处理 `-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` 错误 |
 | **硬件加速（Mali 方案）** | ❌ | 等待匹配的（g13p0–g18p0）bionic 用户态驱动 |
-| **硬件加速（Panfrost 方案）** | **🔄 进行中** | CI 补丁修复 → 部署模块 → opp-fix → 绑定 → Mesa for Android |
+| **硬件加速（Panfrost 方案）** | **🔄 进行中** | CI 补丁通过 → 部署模块 → 重启 → 验证 renderD128 → Mesa for Android |
 
 **根本原因（Mali DDK）：** 内核的 Mali Bifrost 模块（`bifrost_kbase.ko`）编译为 DDK **g18p0-01eac0**（≈r46p0），但所有可用的 Android（bionic）用户态 Mali 驱动都在不兼容的 DDK 版本上。
 
-**根本原因（Panfrost OPP）：** 在 RK3568 上，Mali 的 `rockchip_init_opp_info()` 通过 `dev_pm_opp_set_config()` 预配置 GPU OPP 表。当 Mali 被移除时，`rockchip_uninit_opp_info()` 只做部分清理 — 留下 `supported_hw` 过滤器，导致所有 DT OPP 条目被过滤掉。之后 Panfrost probe 时，`devm_pm_opp_of_add_table()` 返回 `-ENOENT`（"无支持的 OPP"）。
+**根本原因（Panfrost OPP）：** 在 RK3568 上，启动时 Mali-400 驱动（`mali.ko`）自动加载，调用 `rockchip_init_opp_info()` 预配置 GPU OPP 表（含 `supported_hw` 过滤器）。约 28 秒后 Mali-400 被自动卸载，但 `rockchip_uninit_opp_info()` 只做部分清理 — 留下 `supported_hw` 过滤器，导致所有 DT OPP 条目被过滤。之后 Panfrost probe 时，`devm_pm_opp_of_add_table()` 返回 `-ENOENT`（"无支持的 OPP"）。
 
-**当前方案：** 由于 Panfrost 编译进内核（`[permanent]`）无法替换，我们使用 **`opp-fix.ko`** — 一个微型内核模块，清除 `supported_hw` 并从 DT 重新添加 OPP 条目。工作流：加载 Mali → 解绑定 Mali → 加载 `opp-fix.ko` → 绑定内置 Panfrost。无需重启，可直接在现有内核上工作。
+**当前方案：** iStoreOS 24.10.6 的 Panfrost **未编译进内核** — 可作为独立模块加载。我们在 `panfrost_devfreq.c` 上应用补丁，处理所有 OPP 失败路径（`-EBUSY`、`-EEXIST`、`-ENOENT`、`devfreq_recommended_opp()` 错误）。这使得 Panfrost 即使 OPP 状态部分损坏也能正常 probe 和运行（无 devfreq 频率缩放）。作为后备方案，**`opp-fix.ko`** 可在 Mali 已加载并损坏 OPP 状态后修复它。
 
 ## Panfrost（开源 GPU 驱动）— 新方案
 
@@ -51,10 +51,11 @@
 | 5. 首次 probe 尝试 | ⚠️ | Probe 失败 `-EBUSY` — Mali `bifrost_kbase.ko` 遗留的 OPP/regulator 状态 |
 | 6. 根因诊断 | ✅ | 确认 OPP 损坏链：Mali `rockchip_init_opp_info()` → 部分清理 → Panfrost `-ENOENT` |
 | 7. `opp-fix.ko` 内核模块 | ✅ | 微型模块：清除 `supported_hw`（→0xffffffff），重新添加 DT OPP 条目 |
-| 8. `load-panfrost-fixed.sh` 脚本 | ✅ | 完整工作流：加载 Mali → 解绑定 → opp-fix → 绑定 Panfrost → 验证 renderD128 |
+| 8. `load-panfrost-fixed.sh` 脚本 | ✅ | 完整工作流：加载 Mali → 解绑定 → opp-fix → 加载 Panfrost → 验证 renderD128 |
 | 9. CI 补丁（v1） | ✅ | 双 hunk 补丁可用：处理 `-EBUSY`、`-EEXIST`、`-ENOENT` |
-| 10. CI 补丁（v2） | ❌ | 单 hunk 补丁不适用于 vanilla 6.6.127 — 上下文不匹配，需回退到 v1 格式 |
-| 11. 构建 Mesa for Android (bionic) | 🔜 | 用 `-Dgallium-drivers=panfrost` 交叉编译 Mesa 用于 Android 容器 |
+| 10. CI 补丁（v2→v3 修复） | ✅ | 重写：处理所有 OPP 失败路径（`-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` 错误） |
+| 11. 禁用 Mali 自动加载 | ✅ | `mv /etc/modules.d/85-rkgpu-mali400 /etc/modules.d/85-rkgpu-mali400.disabled` |
+| 12. 构建 Mesa for Android (bionic) | 🔜 | 用 `-Dgallium-drivers=panfrost` 交叉编译 Mesa 用于 Android 容器 |
 
 ### Panfrost 内核模块构建方式
 
@@ -83,11 +84,11 @@
 
 **Mali 解绑定后，仅 1/6 的 OPP 条目幸存**（200 MHz — debugfs 已确认）。
 
-内置 Panfrost 有部分 iStoreOS 补丁处理了 `-EBUSY`（跳转到 `opp_add_table`），但**未处理 `devm_pm_opp_of_add_table()` 返回的 `-ENOENT`**。
+没有补丁的情况下，Panfrost 的 `devm_pm_opp_of_add_table()` 会返回 **`-ENOENT`**，因为 `supported_hw` 过滤器阻止了所有 DT OPP 条目。
 
-### `opp-fix.ko` 解决方案
+### `opp-fix.ko` 后备方案
 
-由于 Panfrost 编译进内核（`[permanent]`）无法通过加载不同的 `panfrost.ko` 替换，我们使用**辅助内核模块**来修复 OPP 状态：
+当 Mali 已加载并损坏 OPP 状态时，`opp-fix.ko` 提供**后备方案**来修复 OPP 状态：
 
 **`patches/opp-fix/opp-fix.c`** 执行：
 1. 查找 GPU 设备（`platform-fde60000.gpu`）的 OPP 表
@@ -106,21 +107,22 @@ echo "fde60000.gpu" > /sys/bus/platform/drivers/mali/unbind
 # 步骤 3：加载 opp-fix.ko（修复 supported_hw + 重新添加 OPP 条目）
 insmod /path/to/opp-fix.ko
 
-# 步骤 4：绑定内置 Panfrost（处理 -EBUSY，现在看到干净的 OPP 表）
-echo "fde60000.gpu" > /sys/bus/platform/drivers/panfrost/bind
+# 步骤 4：加载 Panfrost 模块（含 OPP 补丁，现在看到干净的 OPP 表）
+insmod /path/to/panfrost.ko
 
 # 步骤 5：验证
 ls -la /dev/dri/renderD128
 ```
 
-### CI 补丁状态
+### CI 补丁历史
 
 CI 工作流 `.github/workflows/build-panfrost-module.yml` 同时构建 `panfrost.ko`（含 OPP 补丁）和 `opp-fix.ko`。
 
-- **v1 补丁**（双 hunk：`@@ -134,7 +134,12 @@` + `@@ -142,12 +147,16 @@`）：✅ **构建成功**（CI 运行 `25960759519`）
-- **v2 补丁**（单 hunk `@@ -134,17 +134,27 @@`）：❌ **失败** — 上下文不匹配 vanilla Linux 6.6.127 的 `panfrost_devfreq.c`
-
-**修复方向：** 回退到双 hunk 格式，或针对 vanilla 6.6.127 源码手工制作补丁。
+| 补丁版本 | 格式 | 状态 | 详情 |
+|----------|------|------|------|
+| v1 | 双 hunk：`@@ -134,7 +134,12 @@` + `@@ -142,12 +147,16 @@` | ✅ **通过** | CI 运行 `25960759519` 构建成功 |
+| v2 | 单 hunk：`@@ -134,17 +134,27 @@` | ❌ **失败** | 上下文不匹配 vanilla Linux 6.6.127 的 `panfrost_devfreq.c` |
+| v3 | 重写：处理 `-EBUSY`、`-EEXIST`、`-ENOENT`、`devfreq_recommended_opp()` 错误 | ✅ **通过** | 干净应用；处理所有 OPP 失败路径 |
 
 ### 关键发现：`--mount` vs `--device` 用于 `/dev/mali0`
 
@@ -174,6 +176,14 @@ Radxa 文档确认：对于 RK356X，g18p0 内核对应的正确用户态 DDK �
 │  └─────────────────┘    │  ghcr.io/1yeshen/redroid-     │ │
 │                          │  mali-g52:latest              │ │
 │                          └──────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │ 构建 Panfrost 模块（新增）                       │    │
+│  │ 交叉编译 panfrost.ko（内核 6.6.127）             │    │
+│  │ 下载 linux-6.6.127 + OpenWrt 配置               │    │
+│  │ 启用 CONFIG_DRM + CONFIG_DRM_PANFROST           │    │
+│  │ 编译 vmlinux → Module.symvers → make modules     │    │
+│  │ ↓ 输出：panfrost.ko, drm.ko, drm_shmem_helper    │    │
+│  └──────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
          ↓ 在设备上拉取
 ┌─────────────────────────────────────────────────────────┐
@@ -182,10 +192,17 @@ Radxa 文档确认：对于 RK356X，g18p0 内核对应的正确用户态 DDK �
 │  │  Docker 容器: redroid-mali-g52                    │   │
 │  │  ┌────────────────────────────────────────────┐   │   │
 │  │  │  Android 14 (AOSP)                        │   │   │
-│  │  │  ├─ libGLES_mali.so (Mali-G52) ───────────┼──┼───┼───► /dev/mali0
-│  │  │  ├─ gralloc-bifrost.so ───────────────────┼──┼───┼───► /dev/rga
-│  │  │  ├─ hwcomposer.rockchip.so ──────────────┼──┼───┼───► /dev/dri/card0
+│  │  │  ├─ Mesa (Panfrost) ──────────────────────┼──┼───┼───► /dev/dri/renderD128
+│  │  │  ├─ gralloc.gbm ──────────────────────────┼──┼───┼───► /dev/dri/card0
 │  │  │  └─ mpp_service ──────────────────────────┼──┼───┼───► /dev/mpp_service
+│  │  └────────────────────────────────────────────┘   │   │
+│  │                                                    │   │
+│  │  内核模块（新增）：                                │   │
+│  │  ┌────────────────────────────────────────────┐   │   │
+│  │  │  panfrost.ko (→ /dev/dri/renderD128)       │   │   │
+│  │  │  drm.ko                                     │   │   │
+│  │  │  drm_shmem_helper.ko                        │   │   │
+│  │  │  gpu-sched.ko                               │   │   │
 │  │  └────────────────────────────────────────────┘   │   │
 │  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
@@ -311,8 +328,8 @@ insmod /lib/modules/$(uname -r)/bifrost_kbase.ko
 echo "fde60000.gpu" > /sys/bus/platform/drivers/mali/unbind
 # 3. 加载 opp-fix 修复 OPP 表
 insmod /path/to/opp-fix.ko
-# 4. 绑定内置 Panfrost（含 -EBUSY 处理）
-echo "fde60000.gpu" > /sys/bus/platform/drivers/panfrost/bind
+# 4. 加载 Panfrost 模块（含 OPP 补丁）
+insmod /path/to/panfrost.ko
 # 5. 验证
 ls -la /dev/dri/renderD128
 ```
@@ -339,6 +356,17 @@ docker run -d --privileged \
 ```
 
 **注意：** 所有当前的 Mali 用户态驱动（g2p0/g7p1/g25p0）都与内核模块（g18p0）存在 DDK 不匹配。详见[当前状态](#当前状态)。
+
+#### 使用 Panfrost GPU 加速（规划中）
+
+```bash
+# 当 Mesa Panfrost 就绪后，使用 host GPU 模式（自动检测 Panfrost）
+docker run -d --privileged \
+  --name redroid-panfrost \
+  -p 5556:5555 \
+  your-panfrost-image:latest \
+  androidboot.redroid_gpu_mode=host
+```
 
 ### GPU 验证
 
@@ -476,10 +504,8 @@ Mali Bifrost DDK 使用命名规则 `gXXpY`：
 1. **DDK 不匹配（Mali 方案）**：内核模块（g18p0）与用户态驱动（g2p0/g7p1/g25p0）— IOCTL 接口不兼容
 2. **Binder ABI**：内核 6.6 的 binder ABI 与 Android 14 的 libbinder 不兼容（单向垃圾邮件处理方式已更改）。这导致 `servicemanager` 和 `hwservicemanager` 处于僵尸状态。GPU HAL 应仍能正确加载，因为它通过内核驱动通信，而不是 binder
 3. **缺少 bionic g13p0 驱动**：正确的用户态驱动（g13p0 bionic）在公开仓库中尚未找到。必须从 Rockchip 的内部 Android SDK 中提取
-4. **Panfrost 内置 `[permanent]`**：iStoreOS 内核将 Panfrost 编译进内核镜像，因此无法单独加载 `panfrost.ko` 模块（名称冲突）。我们通过 `opp-fix.ko` + 绑定内置驱动来解决
-5. **Panfrost OPP 冲突**：Mali 的 OPP 预配置留下损坏的 `supported_hw` 状态。`opp-fix.ko` 模块可清除此状态，但该方法需要先加载 Mali（初始设置存在鸡与蛋问题）
-6. **CI 补丁格式问题**：v2 单 hunk 补丁不适用于 vanilla Linux 6.6.127。需要回退到双 hunk v1 格式
-7. **Panfrost Mesa 构建**：为 Android (bionic) 构建带 Panfrost Gallium 驱动的 Mesa 仍在进行中。`wode2016501/mesa-for-android-container` 的预构建 Mesa 用于 glibc 容器，不能直接在 redroid 中使用
+4. **Panfrost OPP 冲突**：Mali 的 OPP 预配置留下损坏的 `supported_hw` 状态。`panfrost_devfreq.c` 的内核补丁处理所有 OPP 失败路径，使 Panfrost 可在无 devfreq 的情况下 probe。如果 Mali 已加载，`opp-fix.ko` 提供后备方案修复 OPP 状态
+5. **Panfrost Mesa 构建**：为 Android (bionic) 构建带 Panfrost Gallium 驱动的 Mesa 仍在进行中。`wode2016501/mesa-for-android-container` 的预构建 Mesa 用于 glibc 容器，不能直接在 redroid 中使用
 
 ## 参考
 

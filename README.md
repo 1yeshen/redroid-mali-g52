@@ -16,18 +16,18 @@ Custom **redroid** (Android in Docker) image with **Mali-G52 GPU hardware accele
 | Mali userspace driver load | ⚠️ | g25p0 passes init (rk_so_ver patched 10→8), GPU not functional |
 | SurfaceFlinger GPU init | ❌ | DDK mismatch: kernel g18p0 vs available userspace drivers |
 | **Panfrost kernel module** | **✅ Built** | Cross-compiled for 6.6.127, vermagic matches |
-| **Panfrost module load (built-in)** | **⚠️ Probe fails (-ENOENT)** | Built-in Panfrost handles -EBUSY but not -ENOENT from corrupted OPP state |
-| **`opp-fix.ko` (OPP recovery module)** | **✅ Built** | Clears `supported_hw` filter, re-adds DT OPP entries post-Mali |
+| **Panfrost module load** | **⚠️ Probe fails (-ENOENT)** | Panfrost loads as module; probe fails due to OPP corruption left by Mali `rockchip_init_opp_info()` |
+| **`opp-fix.ko` (OPP recovery module)** | **✅ Built** | Fallback: clears `supported_hw` filter, re-adds DT OPP entries post-Mali |
 | **`load-panfrost-fixed.sh` workflow** | **✅ Script ready** | Mali→unbind→opp-fix→bind Panfrost, verified on device |
-| **Panfrost probe via opp-fix** | **🔄 Pending CI fix** | Patch context mismatch in CI; v1 patch worked, v2 needs correction |
+| **CI patch (v3) — handle all OPP failures** | **✅ Built & passing** | Handles `-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` errors in `panfrost_devfreq.c` |
 | **Hardware acceleration (Mali)** | ❌ | Pending matching (g13p0–g18p0) bionic userspace driver |
-| **Hardware acceleration (Panfrost)** | **🔄 In progress** | CI patch fix → deploy modules → opp-fix → bind → Mesa for Android |
+| **Hardware acceleration (Panfrost)** | **🔄 In progress** | CI patch passing → deploy modules → reboot → verify renderD128 → Mesa for Android |
 
 **Root cause (Mali DDK):** The kernel's Mali Bifrost module (`bifrost_kbase.ko`) is compiled at DDK **g18p0-01eac0** (≈r46p0), but all available Android (bionic) userspace Mali drivers are at incompatible DDK versions.
 
-**Root cause (Panfrost OPP):** On RK3568, Mali's `rockchip_init_opp_info()` pre-populates the GPU OPP table via `dev_pm_opp_set_config()`. When Mali is removed, `rockchip_uninit_opp_info()` only partially cleans up — leaving `supported_hw` filters that kill all DT OPP entries. When Panfrost later probes, `devm_pm_opp_of_add_table()` returns `-ENOENT` ("no supported OPPs").
+**Root cause (Panfrost OPP):** On RK3568, at boot the Mali-400 driver (`mali.ko`) auto-loads and calls `rockchip_init_opp_info()` to pre-configure the GPU OPP table with `supported_hw` filters. ~28s later it's auto-removed by iStoreOS init, but `rockchip_uninit_opp_info()` only partially cleans up — leaving `supported_hw` filters that kill all DT OPP entries. When Panfrost later probes, `devm_pm_opp_of_add_table()` returns `-ENOENT` ("no supported OPPs").
 
-**Current approach:** Instead of rebuilding the kernel (Panfrost is built-in `[permanent]`), we use **`opp-fix.ko`** — a tiny kernel module that clears `supported_hw` and re-adds OPP entries from DT. Workflow: load Mali → unbind Mali → load `opp-fix.ko` → bind built-in Panfrost. This avoids a reboot and works with the existing kernel.
+**Current approach:** On iStoreOS 24.10.6, Panfrost is **not built into the kernel** — it can be loaded as a standalone module. We apply a patch to `panfrost_devfreq.c` that handles all OPP failure paths (`-EBUSY`, `-EEXIST`, `-ENOENT`, and `devfreq_recommended_opp()` errors). This allows Panfrost to probe and run normally (without devfreq frequency scaling) even when OPP state is partially corrupted. As a fallback, **`opp-fix.ko`** can repair OPP state if Mali has already loaded and corrupted it.
 
 ## Panfrost (Open-Source GPU Driver) — New Approach
 
@@ -53,8 +53,9 @@ After exhausting the closed-source Mali userspace driver approach (see [DDK Comp
 | 7. `opp-fix.ko` kernel module | ✅ | Tiny module that clears `supported_hw` (→0xffffffff) and re-adds DT OPP entries |
 | 8. `load-panfrost-fixed.sh` script | ✅ | Complete workflow: load Mali → unbind → opp-fix → bind Panfrost → verify renderD128 |
 | 9. CI patch (v1) | ✅ | Two-hunk patch worked: handles `-EBUSY`, `-EEXIST`, `-ENOENT` from pre-configured OPP |
-| 10. CI patch (v2) | ❌ | Single-hunk patch doesn't apply to vanilla 6.6.127 — context mismatch. Needs revert to v1 format |
-| 11. Build Mesa for Android (bionic) | 🔜 | Cross-compile Mesa with `-Dgallium-drivers=panfrost` for Android container |
+| 10. CI patch (v2→v3 fix) | ✅ | Rewrite: handles all OPP failure paths (`-EBUSY`/`-EEXIST`/`-ENOENT` + `devfreq_recommended_opp()` errors) |
+| 11. Disable Mali auto-load | ✅ | `mv /etc/modules.d/85-rkgpu-mali400 /etc/modules.d/85-rkgpu-mali400.disabled` |
+| 12. Build Mesa for Android (bionic) | 🔜 | Cross-compile Mesa with `-Dgallium-drivers=panfrost` for Android container |
 
 ### How the Panfrost Kernel Module Was Built
 
@@ -83,11 +84,11 @@ On RK3568 (EasePi R1) running iStoreOS kernel 6.6.127:
 
 **After Mali unbind, only 1/6 OPP entries survive** (200 MHz — debugfs confirmed).
 
-The built-in Panfrost has a partial iStoreOS patch that handles `-EBUSY` (skips to `opp_add_table`), but **does NOT handle `-ENOENT`** from `devm_pm_opp_of_add_table()`.
+Without the patch, Panfrost's `devm_pm_opp_of_add_table()` returns **`-ENOENT`** because the `supported_hw` filter blocks all DT OPP entries.
 
-### The `opp-fix.ko` Solution
+### The `opp-fix.ko` Fallback
 
-Since Panfrost is built into the kernel (`[permanent]`) and can't be replaced by loading a different `panfrost.ko`, we use a **helper kernel module** to fix OPP state:
+When Mali has already loaded and corrupted the OPP state, `opp-fix.ko` provides a **fallback** to repair OPP state so Panfrost can bind successfully:
 
 **`patches/opp-fix/opp-fix.c`** does:
 1. Find the GPU device (`platform-fde60000.gpu`) OPP table
@@ -106,21 +107,22 @@ echo "fde60000.gpu" > /sys/bus/platform/drivers/mali/unbind
 # Step 3: Load opp-fix.ko (fixes supported_hw + re-adds OPP entries)
 insmod /path/to/opp-fix.ko
 
-# Step 4: Bind built-in Panfrost (handles -EBUSY, now sees clean OPP table)
-echo "fde60000.gpu" > /sys/bus/platform/drivers/panfrost/bind
+# Step 4: Load Panfrost module (with OPP patch, now sees clean OPP table)
+insmod /path/to/panfrost.ko
 
 # Step 5: Verify
 ls -la /dev/dri/renderD128
 ```
 
-### CI Patch Status
+### CI Patch History
 
 The CI workflow `.github/workflows/build-panfrost-module.yml` builds both `panfrost.ko` (with OPP patch) and `opp-fix.ko`.
 
-- **v1 patch** (two hunks: `@@ -134,7 +134,12 @@` + `@@ -142,12 +147,16 @@`): ✅ **Built successfully** in CI run `25960759519`
-- **v2 patch** (single hunk `@@ -134,17 +134,27 @@`): ❌ **Fails** — context doesn't match vanilla Linux 6.6.127's `panfrost_devfreq.c`
-
-**Fix needed:** Revert to two-hunk format or hand-craft patch against vanilla 6.6.127 source.
+| Patch Version | Format | Status | Details |
+|---------------|--------|--------|---------|
+| v1 | Two hunks: `@@ -134,7 +134,12 @@` + `@@ -142,12 +147,16 @@` | ✅ **Passed** | Built successfully in CI run `25960759519` |
+| v2 | Single hunk: `@@ -134,17 +134,27 @@` | ❌ **Failed** | Context mismatch with vanilla Linux 6.6.127's `panfrost_devfreq.c` |
+| v3 | Rewrite: handles `-EBUSY`, `-EEXIST`, `-ENOENT`, `devfreq_recommended_opp()` errors | ✅ **Passed** | Applied cleanly; handles all OPP failure paths |
 
 ### Critical Discovery: `--mount` vs `--device` for `/dev/mali0`
 
@@ -327,8 +329,8 @@ insmod /lib/modules/$(uname -r)/bifrost_kbase.ko
 echo "fde60000.gpu" > /sys/bus/platform/drivers/mali/unbind
 # 3. Load opp-fix to repair OPP table
 insmod /path/to/opp-fix.ko
-# 4. Bind built-in Panfrost (has -EBUSY handling)
-echo "fde60000.gpu" > /sys/bus/platform/drivers/panfrost/bind
+# 4. Load Panfrost module (has OPP patch)
+insmod /path/to/panfrost.ko
 # 5. Verify
 ls -la /dev/dri/renderD128
 ```
@@ -504,10 +506,8 @@ This fixes the SIGHUP (exit 129) during init, allowing the container to boot. Ho
 1. **DDK mismatch (Mali approach)**: Kernel module (g18p0) vs userspace drivers (g2p0/g7p1/g25p0) — IOCTL interface incompatibility
 2. **Binder ABI**: Kernel 6.6 binder ABI is incompatible with Android 14's libbinder (oneway spam handling changed). This causes `servicemanager` and `hwservicemanager` to be zombie. GPU HAL should still load correctly since it communicates via kernel driver, not binder.
 3. **Missing bionic g13p0 driver**: The correct userspace driver (g13p0 bionic) has not been found in public repositories. It must be extracted from Rockchip's internal Android SDK.
-4. **Panfrost built-in `[permanent]`**: iStoreOS kernel has Panfrost compiled into the kernel image, so a separate `panfrost.ko` module cannot be loaded (name conflict). We work around this with `opp-fix.ko` + binding the built-in driver.
-5. **Panfrost OPP conflict**: Mali's OPP pre-configuration leaves corrupted `supported_hw` state. The `opp-fix.ko` module clears this, but the approach requires Mali to be loaded first (chicken-and-egg for initial setup).
-6. **CI patch format issue**: The v2 single-hunk patch doesn't apply to vanilla Linux 6.6.127. Needs revert to two-hunk v1 format.
-7. **Panfrost Mesa build**: Building Mesa for Android (bionic) with Panfrost Gallium driver is still in progress. The pre-built Mesa from `wode2016501/mesa-for-android-container` is for glibc containers and cannot be used directly in redroid.
+4. **Panfrost OPP conflict**: Mali's OPP pre-configuration leaves corrupted `supported_hw` state. The kernel patch to `panfrost_devfreq.c` handles all OPP failure paths, allowing Panfrost to probe without devfreq. If Mali has already loaded, `opp-fix.ko` provides a fallback to repair OPP state.
+5. **Panfrost Mesa build**: Building Mesa for Android (bionic) with Panfrost Gallium driver is still in progress. The pre-built Mesa from `wode2016501/mesa-for-android-container` is for glibc containers and cannot be used directly in redroid.
 
 ## References
 
